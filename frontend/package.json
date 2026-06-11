@@ -1,0 +1,31 @@
+{
+  "name": "intelligence-layer-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@leafygreen-ui/badge": "^9.0.0",
+    "@leafygreen-ui/banner": "^10.0.0",
+    "@leafygreen-ui/button": "^22.0.0",
+    "@leafygreen-ui/card": "^11.0.0",
+    "@leafygreen-ui/code": "^15.0.0",
+    "@leafygreen-ui/leafygreen-provider": "^4.0.0",
+    "@leafygreen-ui/table": "^13.0.0",
+    "@leafygreen-ui/tabs": "^14.0.0",
+    "@leafygreen-ui/text-input": "^14.0.0",
+    "@leafygreen-ui/typography": "^20.0.0",
+    "buffer": "^6.0.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.0",
+    "vite-plugin-node-polyfills": "^0.28.0"
+  }
+}

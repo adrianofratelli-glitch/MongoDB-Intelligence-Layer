@@ -1,0 +1,14 @@
+# credenciais — NUNCA commitar
+.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# node
+node_modules/
+dist/
+
+# misc
+.DS_Store
