@@ -107,7 +107,7 @@ export default function SessionMemory({ state, setState }) {
             {turns.length === 0 && (
               <div className="dim">
                 Converse: cada turno vira um $push no array turns[] do documento ao lado —
-                sem JOIN, sem tabela de turns, sem cache layer separado.
+                a memória conversacional vive dentro da própria sessão.
               </div>
             )}
             {turns.map((t) => (

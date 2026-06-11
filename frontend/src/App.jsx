@@ -33,8 +33,8 @@ export default function App() {
       <main className="content">
         <h1 className="page-title">MongoDB Intelligence Layer</h1>
         <p className="page-subtitle">
-          A camada de orquestração de AI muda na velocidade dos LLMs — em MongoDB isso é um
-          update, não uma migration.
+          A camada de orquestração de AI muda na velocidade dos LLMs — em MongoDB isso é
+          um simples update.
         </p>
         <Tabs
           darkMode
@@ -42,7 +42,7 @@ export default function App() {
           selected={selected}
           setSelected={setSelected}
         >
-          <Tab name="1 · Schema War" />
+          <Tab name="1 · Schema Flexível" />
           <Tab name="2 · Model Swap ao vivo" />
           <Tab name="3 · Session Memory ao vivo" />
           <Tab name="4 · Intent Routing + RAG" />
