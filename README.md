@@ -94,3 +94,23 @@ flowchart LR
    npm install
    npm run dev               # http://localhost:5173
    ```
+
+## Docker (POC empacotada)
+
+```bash
+docker build -t intelligence-layer-poc .
+docker run --env-file .env -p 8080:8080 intelligence-layer-poc
+# → http://localhost:8080 (nginx serve o frontend e proxeia /api para o FastAPI)
+```
+
+## Testes visuais de regressão
+
+Com a POC no ar (`./start.sh`):
+
+```bash
+npm install
+npm run test:visual           # compara as 4 abas com as baselines em tests/visual/
+npm run test:visual:update    # regrava as baselines após uma mudança intencional de UI
+```
+
+Regiões dinâmicas (counts, documentos do Atlas, chat) são mascaradas — o teste protege o layout.

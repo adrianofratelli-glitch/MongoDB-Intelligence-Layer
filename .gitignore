@@ -12,3 +12,7 @@ dist/
 
 # misc
 .DS_Store
+
+# playwright
+test-results/
+playwright-report/
