@@ -279,8 +279,10 @@ class SearchBody(BaseModel):
 async def pipeline_search(body: SearchBody):
     cfg = await get_active_config()
     routing = await resolve_routing(body.intent, cfg["primary"]["model"])
-    chunks = await vector_search(body.question, routing["rag_config"])
-    return clean({"chunks": chunks, "rag_config": routing["rag_config"]})
+    chunks, funnel = await vector_search(body.question, routing["rag_config"])
+    # estimativa de tokens do contexto injetado (~4 chars/token)
+    funnel["context_tokens_est"] = len(format_chunks(chunks)) // 4
+    return clean({"chunks": chunks, "rag_config": routing["rag_config"], "funnel": funnel})
 
 
 class AnswerBody(BaseModel):
@@ -292,11 +294,11 @@ class AnswerBody(BaseModel):
 async def pipeline_answer(body: AnswerBody):
     cfg = await get_active_config()
     routing = await resolve_routing(body.intent, cfg["primary"]["model"])
-    chunks = await vector_search(body.question, routing["rag_config"])
+    chunks, funnel = await vector_search(body.question, routing["rag_config"])
     variant = routing["variant"] or {}
     user_prompt = render_user_prompt(variant, body.question, format_chunks(chunks))
     result = await call_with_fallback(
         system=variant.get("system", "Responda em português."),
         messages=[{"role": "user", "content": user_prompt}],
     )
-    return clean({"answer": result, "chunks_used": len(chunks)})
+    return clean({"answer": result, "chunks_used": len(chunks), "funnel": funnel})

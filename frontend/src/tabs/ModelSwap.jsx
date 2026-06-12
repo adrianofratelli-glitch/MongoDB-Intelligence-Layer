@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import Card from '@leafygreen-ui/card';
 import Badge from '@leafygreen-ui/badge';
 import Banner from '@leafygreen-ui/banner';
 import Button from '@leafygreen-ui/button';
@@ -8,6 +7,35 @@ import JsonViewer from '../components/JsonViewer.jsx';
 import { api } from '../api.js';
 
 const modelBadge = (model) => (model?.includes('sonnet') ? 'blue' : 'yellow');
+
+// preço por 1M tokens (input/output) — Anthropic API
+const PRICES = { sonnet: { in: 3, out: 15 }, haiku: { in: 1, out: 5 } };
+const family = (model) => (model?.includes('haiku') ? 'haiku' : 'sonnet');
+
+// agrega tokens/latência reais das respostas do mini-chat, por família de modelo
+function costStats(messages) {
+  const byModel = {};
+  for (const m of messages) {
+    if (!m.meta) continue;
+    const f = family(m.meta.model);
+    byModel[f] ??= { n: 0, inTok: 0, outTok: 0, latency: 0 };
+    byModel[f].n += 1;
+    byModel[f].inTok += m.meta.input_tokens;
+    byModel[f].outTok += m.meta.output_tokens;
+    byModel[f].latency += m.meta.latency_ms;
+  }
+  return Object.entries(byModel).map(([f, s]) => {
+    const p = PRICES[f];
+    const perQuery = ((s.inTok / s.n) * p.in + (s.outTok / s.n) * p.out) / 1_000_000;
+    return {
+      family: f,
+      n: s.n,
+      avgLatency: Math.round(s.latency / s.n),
+      perQuery,
+      monthly: perQuery * 10_000 * 30,
+    };
+  });
+}
 
 export default function ModelSwap({ state, setState }) {
   const { config, messages } = state;
@@ -74,7 +102,7 @@ export default function ModelSwap({ state, setState }) {
       )}
 
       <div className="two-col">
-        <Card darkMode>
+        <div className="card">
           <div className="card-header">
             <span className="card-title">ai_brain.model_config — lido a cada request</span>
             {config && <Badge variant={modelBadge(config.primary?.model)}>{config.primary?.model}</Badge>}
@@ -90,9 +118,9 @@ export default function ModelSwap({ state, setState }) {
           ) : (
             <div className="dim">carregando…</div>
           )}
-        </Card>
+        </div>
 
-        <Card darkMode>
+        <div className="card">
           <div className="card-header">
             <span className="card-title">Mini-chat — quem responde é o doc</span>
           </div>
@@ -135,8 +163,37 @@ export default function ModelSwap({ state, setState }) {
               Enviar
             </Button>
           </div>
-        </Card>
+        </div>
       </div>
+
+      {costStats(messages).length > 0 && (
+        <div className="card neutral">
+          <div className="card-header">
+            <span className="card-title">O swap em dinheiro — tokens reais desta sessão</span>
+            <span className="dim mono">projeção @ 10.000 queries/dia</span>
+          </div>
+          <div className="cost-grid" style={{ gap: 40 }}>
+            {costStats(messages).map((s) => (
+              <div className="cost-item" key={s.family}>
+                <div className="row" style={{ marginBottom: 4 }}>
+                  <Badge variant={s.family === 'sonnet' ? 'blue' : 'yellow'}>
+                    claude-{s.family}
+                  </Badge>
+                  <span className="dim mono">{s.n} respostas · ~{s.avgLatency} ms</span>
+                </div>
+                <div className="cost-val">${s.monthly.toFixed(0)}/mês</div>
+                <div className="cost-label">
+                  ${s.perQuery.toFixed(5)} por query (tokens médios reais)
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="dim" style={{ marginTop: 12, marginBottom: 0 }}>
+            Trocar o modelo é um update_one — e a diferença de custo aparece aqui, calculada
+            com os tokens reais das respostas acima.
+          </p>
+        </div>
+      )}
     </div>
   );
 }

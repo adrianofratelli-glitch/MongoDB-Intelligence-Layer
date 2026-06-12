@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import Card from '@leafygreen-ui/card';
 import Badge from '@leafygreen-ui/badge';
 import Banner from '@leafygreen-ui/banner';
 import Button from '@leafygreen-ui/button';
@@ -83,6 +82,98 @@ const CONCERNS = [
   },
 ];
 
+// Race: o mesmo "modelo novo entrou em produção" nos dois mundos
+const RACE_MDB = [
+  'update_one: $set da variante nova',
+  'Backend lê o doc no próximo request',
+  'autoEmbed re-vetoriza o que mudou',
+  'Em produção',
+];
+const RACE_ALT = [
+  'Escrever migration (ALTER TABLE)',
+  'Code review da migration',
+  'Rodar em staging + smoke test',
+  'Janela de deploy em produção',
+  'Backfill das colunas novas',
+  'Sincronizar vector DB separado',
+  'Invalidar caches / reiniciar serviços',
+  'Em produção',
+];
+
+function FlowRace() {
+  const [mdbState, setMdbState] = useState([]); // 'active' | 'done' por índice
+  const [altState, setAltState] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [doneSides, setDoneSides] = useState({ mdb: false, alt: false });
+
+  const run = () => {
+    if (running) return;
+    setRunning(true);
+    setMdbState([]);
+    setAltState([]);
+    setDoneSides({ mdb: false, alt: false });
+
+    const animate = (steps, setFn, stepMs, onDone) => {
+      steps.forEach((_, i) => {
+        setTimeout(() => setFn((s) => { const n = [...s]; n[i] = 'active'; return n; }), i * stepMs + 100);
+        setTimeout(() => setFn((s) => { const n = [...s]; n[i] = 'done'; return n; }), (i + 1) * stepMs);
+      });
+      setTimeout(onDone, steps.length * stepMs + 200);
+    };
+
+    animate(RACE_MDB, setMdbState, 450, () => setDoneSides((d) => ({ ...d, mdb: true })));
+    animate(RACE_ALT, setAltState, 900, () => {
+      setDoneSides((d) => ({ ...d, alt: true }));
+      setRunning(false);
+    });
+  };
+
+  return (
+    <div className="card neutral">
+      <div className="card-header">
+        <span className="card-title">Saiu um modelo novo de LLM — o caminho até produção</span>
+        <Button darkMode variant="primary" size="small" onClick={run} disabled={running}>
+          {running ? 'Rodando…' : '▶ Rodar comparação'}
+        </Button>
+      </div>
+      <div className="flow-grid">
+        <div>
+          <div className="row" style={{ marginBottom: 10 }}>
+            <Badge variant="green">MongoDB — uma plataforma</Badge>
+          </div>
+          <div className="flow-path">
+            {RACE_MDB.map((label, i) => (
+              <div key={label} className={`flow-node ${mdbState[i] === 'active' ? 'active-mdb' : ''} ${mdbState[i] === 'done' ? 'done-mdb' : ''}`}>
+                <span>{label}</span>
+                <span className="flow-check">✓</span>
+              </div>
+            ))}
+          </div>
+          <div className={`flow-total mdb ${doneSides.mdb ? 'show' : ''}`}>
+            ✓ minutos — operação de dado
+          </div>
+        </div>
+        <div>
+          <div className="row" style={{ marginBottom: 10 }}>
+            <Badge variant="lightgray">Stack costurada — relacional + vector DB</Badge>
+          </div>
+          <div className="flow-path">
+            {RACE_ALT.map((label, i) => (
+              <div key={label} className={`flow-node ${altState[i] === 'active' ? 'active-alt' : ''} ${altState[i] === 'done' ? 'done-alt' : ''}`}>
+                <span>{label}</span>
+                <span className="flow-check">✓</span>
+              </div>
+            ))}
+          </div>
+          <div className={`flow-total alt ${doneSides.alt ? 'show' : ''}`}>
+            dias/semanas — operação de infra
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function SchemaWar({ state, setState }) {
   const { doc, flash } = state;
   const [busy, setBusy] = useState(false);
@@ -128,7 +219,7 @@ export default function SchemaWar({ state, setState }) {
       )}
 
       <div className="two-col">
-        <Card darkMode>
+        <div className="card alt">
           <div className="card-header">
             <span className="card-title">PostgreSQL</span>
             <Badge variant="red">migration + deploy + downtime</Badge>
@@ -140,9 +231,9 @@ export default function SchemaWar({ state, setState }) {
           <Code language="sql" darkMode copyable={false}>
             {POSTGRES_MIGRATION}
           </Code>
-        </Card>
+        </div>
 
-        <Card darkMode>
+        <div className="card">
           <div className="card-header">
             <span className="card-title">MongoDB — documento real, ao vivo do Atlas</span>
             <span style={{ whiteSpace: 'nowrap' }}><Badge variant="green">1 update, zero migration</Badge></span>
@@ -166,10 +257,10 @@ export default function SchemaWar({ state, setState }) {
           ) : (
             <div className="dim">carregando documento…</div>
           )}
-        </Card>
+        </div>
       </div>
 
-      <Card darkMode>
+      <div className="card">
         <div className="card-title" style={{ marginBottom: 12 }}>
           Mesmo concern, dois mundos
         </div>
@@ -197,7 +288,9 @@ export default function SchemaWar({ state, setState }) {
             ))}
           </TableBody>
         </Table>
-      </Card>
+      </div>
+
+      <FlowRace />
     </div>
   );
 }

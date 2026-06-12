@@ -1,10 +1,16 @@
-import { useState } from 'react';
-import { Tabs, Tab } from '@leafygreen-ui/tabs';
-import Sidebar from './components/Sidebar.jsx';
+import { useEffect, useState } from 'react';
 import SchemaWar from './tabs/SchemaWar.jsx';
 import ModelSwap from './tabs/ModelSwap.jsx';
 import SessionMemory from './tabs/SessionMemory.jsx';
 import IntentRouting from './tabs/IntentRouting.jsx';
+import { api } from './api.js';
+
+const TABS = [
+  '01 · Schema Flexível',
+  '02 · Model Swap',
+  '03 · Session Memory',
+  '04 · Intent + RAG',
+];
 
 export default function App() {
   const [selected, setSelected] = useState(0);
@@ -20,6 +26,31 @@ export default function App() {
   });
   const [pipelineState, setPipelineState] = useState({ question: '', steps: null });
 
+  // health do cluster — alimenta o status pill e a stat bar
+  const [health, setHealth] = useState(null);
+  const [healthError, setHealthError] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const h = await api.health();
+        if (alive) {
+          setHealth(h);
+          setHealthError(false);
+        }
+      } catch {
+        if (alive) setHealthError(true);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 10_000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+
   const panes = [
     <SchemaWar state={schemaWarState} setState={setSchemaWarState} />,
     <ModelSwap state={modelSwapState} setState={setModelSwapState} />,
@@ -27,33 +58,78 @@ export default function App() {
     <IntentRouting state={pipelineState} setState={setPipelineState} />,
   ];
 
+  const counts = health?.counts ?? {};
+
   return (
-    <div className="app">
-      <Sidebar />
+    <>
+      <nav className="top-nav">
+        <div className="nav-inner">
+          <span className="nav-logo">
+            <span className="leaf">●</span> MongoDB Intelligence Layer
+          </span>
+          <div className="nav-pills">
+            {TABS.map((name, i) => (
+              <button
+                key={name}
+                className={`nav-pill ${i === selected ? 'active' : ''}`}
+                onClick={() => setSelected(i)}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+          <span className="status-pill">
+            <span className={`status-dot ${healthError || !health ? 'err' : 'ok'}`} />
+            {healthError ? 'sem conexão' : health ? 'Atlas · ping ok' : 'conectando…'}
+          </span>
+        </div>
+      </nav>
+
       <main className="content">
-        <h1 className="page-title">MongoDB Intelligence Layer</h1>
+        <div className="hero-kicker">POC · AI Orchestration Layer</div>
+        <h1 className="page-title">
+          A camada de AI vive em <span>documentos</span>
+        </h1>
         <p className="page-subtitle">
-          A camada de orquestração de AI muda na velocidade dos LLMs — em MongoDB isso é
-          um simples update.
+          Prompts, memória de sessão, roteamento de intents e configuração de modelos
+          mudam na velocidade dos LLMs — em MongoDB isso é um simples update.
         </p>
-        <Tabs
-          darkMode
-          aria-label="tabs da demo"
-          selected={selected}
-          setSelected={setSelected}
-        >
-          <Tab name="1 · Schema Flexível" />
-          <Tab name="2 · Model Swap ao vivo" />
-          <Tab name="3 · Session Memory ao vivo" />
-          <Tab name="4 · Intent Routing + RAG" />
-        </Tabs>
-        <div className="spacer" />
+
+        <div className="stat-bar">
+          <div className="stat-item">
+            <div className="stat-val accent">{counts.prompt_templates ?? '—'}</div>
+            <div className="stat-label">prompt_templates</div>
+          </div>
+          <div className="stat-item">
+            <div className="stat-val accent">{counts.intent_registry ?? '—'}</div>
+            <div className="stat-label">intent_registry</div>
+          </div>
+          <div className="stat-item">
+            <div className="stat-val accent">{counts.session_memory ?? '—'}</div>
+            <div className="stat-label">session_memory</div>
+          </div>
+          <div className="stat-item">
+            <div className="stat-val">200K</div>
+            <div className="stat-label">produtos vetorizados</div>
+          </div>
+          <div className="stat-item">
+            <div className="stat-val" style={{ fontSize: '1rem', lineHeight: '1.9' }}>
+              {health?.primary_model ?? '—'}
+            </div>
+            <div className="stat-label">modelo primário ativo</div>
+          </div>
+        </div>
+
         {panes.map((pane, i) => (
           <div key={i} style={{ display: i === selected ? 'block' : 'none' }}>
-            {pane}
+            <div className={i === selected ? 'fade-in' : ''}>{pane}</div>
           </div>
         ))}
       </main>
-    </div>
+
+      <footer className="app-footer">
+        <p>MongoDB Atlas · cluster Inter · POC.produtos_vector — autoEmbed voyage-4</p>
+      </footer>
+    </>
   );
 }

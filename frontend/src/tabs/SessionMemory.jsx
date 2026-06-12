@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import Card from '@leafygreen-ui/card';
 import Badge from '@leafygreen-ui/badge';
 import Banner from '@leafygreen-ui/banner';
 import Button from '@leafygreen-ui/button';
@@ -98,7 +97,7 @@ export default function SessionMemory({ state, setState }) {
       </div>
 
       <div className="two-col">
-        <Card darkMode>
+        <div className="card">
           <div className="card-header">
             <span className="card-title">Chat</span>
             <Badge variant="darkgray">{turns.length} turnos</Badge>
@@ -145,9 +144,9 @@ export default function SessionMemory({ state, setState }) {
               Enviar
             </Button>
           </div>
-        </Card>
+        </div>
 
-        <Card darkMode>
+        <div className="card">
           <div className="card-header">
             <span className="card-title">ai_brain.session_memory — documento cru</span>
             <span style={{ whiteSpace: 'nowrap' }}><Badge variant="green">turns[] crescendo ao vivo</Badge></span>
@@ -157,7 +156,7 @@ export default function SessionMemory({ state, setState }) {
           ) : (
             <div className="dim">criando sessão…</div>
           )}
-        </Card>
+        </div>
       </div>
     </div>
   );
