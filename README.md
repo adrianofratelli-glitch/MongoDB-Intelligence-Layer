@@ -1,59 +1,61 @@
 # MongoDB Intelligence Layer — POC
 
-Demonstração de MongoDB como camada de orquestração para aplicações de AI:
-prompts, memória de sessão, roteamento de intents e configuração de modelos
-vivem como documentos — e evoluem com um simples `update_one`.
+A proof of concept showing MongoDB as the orchestration layer for AI applications.
+Prompts, session memory, intent routing, and model configuration all live as
+documents — and evolve with a single `update_one`, not a migration or a redeploy.
 
-**Stack:** React + Vite + LeafyGreen UI · FastAPI + Motor (async) · MongoDB Atlas (Vector Search com autoEmbed voyage-4) · Anthropic API (Sonnet 4.5 / Haiku 4.5)
+**Stack:** React + Vite + LeafyGreen UI · FastAPI + Motor (async) · MongoDB Atlas (Vector Search with autoEmbed voyage-4) · Anthropic API (Sonnet 4.5 / Haiku 4.5)
 
-## A demo em ação
+> The demo UI is in Portuguese, since it is used in client-facing sessions with Brazilian teams.
 
-### Tab 1 — Schema flexível
-Templates de prompt com variantes por modelo são documentos polimórficos: adicionar uma variante para um modelo novo é um `$set` ao vivo no Atlas — o JSON atualiza na tela em tempo real.
+## The demo in action
 
-![Schema flexível](docs/img/tab1-schema-flexivel.png)
+### Tab 1 — Flexible schema
+Prompt templates with per-model variants are polymorphic documents: adding a variant for a new model is a live `$set` against Atlas, and the JSON updates on screen in real time.
 
-### Tab 2 — Model Swap ao vivo
-O modelo de produção é um documento (`model_config`), lido a cada request. Trocar Sonnet ↔ Haiku é um `update_one` — zero restart, zero deploy.
+![Flexible schema](docs/img/tab1-schema-flexivel.png)
 
-![Model Swap](docs/img/tab2-model-swap.png)
+### Tab 2 — Live model swap
+The production model is a document (`model_config`), read on every request. Switching Sonnet ↔ Haiku is an `update_one` — zero restarts, zero deploys. A cost panel projects the monthly spend per model from the real token counts of the session.
 
-### Tab 3 — Session Memory ao vivo
-Chat à esquerda, documento cru da sessão à direita — cada turno é um `$push` no array `turns[]`, com `model_used` e `tokens_used` por turno. O documento É a sessão.
+![Model swap](docs/img/tab2-model-swap.png)
 
-![Session Memory](docs/img/tab3-session-memory.png)
+### Tab 3 — Live session memory
+Chat on the left, the raw session document on the right — each turn is a `$push` onto the `turns[]` array, carrying `model_used` and `tokens_used`. The document *is* the session.
 
-### Tab 4 — Intent Routing + RAG
-Pipeline completo orquestrado por documentos: Haiku classifica o intent (~1s), o intent aponta para template + rag_config, o `$vectorSearch` roda sobre 200K produtos com autoEmbed voyage-4, e o Sonnet gera a resposta final com os chunks no contexto.
+![Session memory](docs/img/tab3-session-memory.png)
 
-![Intent Routing + RAG](docs/img/tab4-intent-rag.png)
+### Tab 4 — Intent routing + RAG
+A full pipeline orchestrated by documents: Haiku classifies the intent (~1s), the intent points to a template and a `rag_config`, `$vectorSearch` runs over 200K products with autoEmbed voyage-4, and Sonnet produces the final answer from the retrieved chunks. A retrieval funnel and a cost panel show how candidate narrowing maps to context tokens and dollars at scale.
 
-## Arquitetura
+![Intent routing + RAG](docs/img/tab4-intent-rag.png)
+
+## Architecture
 
 ```mermaid
 flowchart LR
     subgraph Frontend [React + Vite + LeafyGreen]
-        T1[Tab 1: Schema flexível]
-        T2[Tab 2: Model Swap]
-        T3[Tab 3: Session Memory]
+        T1[Tab 1: Flexible schema]
+        T2[Tab 2: Model swap]
+        T3[Tab 3: Session memory]
         T4[Tab 4: Intent + RAG]
     end
 
     subgraph Backend [FastAPI + Motor]
         API[main.py]
-        LLM[llm.py — lê model_config a cada call]
-        INT[intents.py — classificação Haiku]
+        LLM[llm.py — reads model_config on every call]
+        INT[intents.py — Haiku classification]
         RAG[rag.py — \$vectorSearch]
     end
 
-    subgraph Atlas [MongoDB Atlas — cluster Inter]
+    subgraph Atlas [MongoDB Atlas]
         subgraph ai_brain
             PT[(prompt_templates)]
             MC[(model_config)]
             IR[(intent_registry)]
             SM[(session_memory)]
         end
-        PV[(POC.produtos_vector\n200K produtos, autoEmbed voyage-4)]
+        PV[(POC.produtos_vector\n200K products, autoEmbed voyage-4)]
     end
 
     ANT[Anthropic API\nSonnet 4.5 / Haiku 4.5]
@@ -68,13 +70,13 @@ flowchart LR
     API --> SM
 ```
 
-## Setup
+## Getting started
 
-1. **Credenciais** (nunca commitar o `.env` real):
+1. **Credentials** (never commit the real `.env`):
 
    ```bash
    cp .env.example .env
-   # preencha MONGODB_URI e ANTHROPIC_API_KEY
+   # fill in MONGODB_URI and ANTHROPIC_API_KEY
    ```
 
 2. **Backend**:
@@ -83,7 +85,7 @@ flowchart LR
    cd backend
    python3 -m venv .venv && source .venv/bin/activate
    pip install -r requirements.txt
-   python seed.py            # popula ai_brain e imprime os counts
+   python seed.py            # seeds ai_brain and prints the collection counts
    uvicorn main:app --reload --port 8000
    ```
 
@@ -95,22 +97,24 @@ flowchart LR
    npm run dev               # http://localhost:5173
    ```
 
-## Docker (POC empacotada)
+The included `start.sh` boots both processes at once (FastAPI on :8000, Vite on :5173).
+
+## Docker
 
 ```bash
 docker build -t intelligence-layer-poc .
 docker run --env-file .env -p 8080:8080 intelligence-layer-poc
-# → http://localhost:8080 (nginx serve o frontend e proxeia /api para o FastAPI)
+# → http://localhost:8080 (nginx serves the frontend and proxies /api to FastAPI)
 ```
 
-## Testes visuais de regressão
+## Visual regression tests
 
-Com a POC no ar (`./start.sh`):
+With the app running (`./start.sh`):
 
 ```bash
 npm install
-npm run test:visual           # compara as 4 abas com as baselines em tests/visual/
-npm run test:visual:update    # regrava as baselines após uma mudança intencional de UI
+npm run test:visual           # compares the four tabs against the baselines in tests/visual/
+npm run test:visual:update    # regenerates the baselines after an intentional UI change
 ```
 
-Regiões dinâmicas (counts, documentos do Atlas, chat) são mascaradas — o teste protege o layout.
+Dynamic regions (collection counts, live Atlas documents, chat history) are masked, so the tests guard layout rather than data.

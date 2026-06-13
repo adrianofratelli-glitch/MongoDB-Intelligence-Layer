@@ -8,11 +8,11 @@ import { api } from '../api.js';
 
 const modelBadge = (model) => (model?.includes('sonnet') ? 'blue' : 'yellow');
 
-// preço por 1M tokens (input/output) — Anthropic API
+// price per 1M tokens (input/output) — Anthropic API
 const PRICES = { sonnet: { in: 3, out: 15 }, haiku: { in: 1, out: 5 } };
 const family = (model) => (model?.includes('haiku') ? 'haiku' : 'sonnet');
 
-// agrega tokens/latência reais das respostas do mini-chat, por família de modelo
+// aggregates real tokens/latency from the mini-chat responses, by model family
 function costStats(messages) {
   const byModel = {};
   for (const m of messages) {

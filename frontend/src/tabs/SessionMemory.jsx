@@ -12,7 +12,7 @@ export default function SessionMemory({ state, setState }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const chatEndRef = useRef(null);
-  const initRef = useRef(false); // StrictMode monta efeitos 2x em dev — evita sessão duplicada
+  const initRef = useRef(false); // StrictMode runs effects twice in dev — avoids a duplicate session
 
   const newSession = async () => {
     setError(null);
@@ -32,7 +32,7 @@ export default function SessionMemory({ state, setState }) {
     }
   }, []);
 
-  // polling de 2s: o documento cru à direita acompanha o Atlas
+  // 2s polling: the raw document on the right stays in sync with Atlas
   useEffect(() => {
     if (!sessionId) return;
     const id = setInterval(async () => {
@@ -44,7 +44,7 @@ export default function SessionMemory({ state, setState }) {
             : s,
         );
       } catch {
-        /* banner já cobre erros das ações do usuário */
+        /* banner already covers errors from user actions */
       }
     }, 2000);
     return () => clearInterval(id);

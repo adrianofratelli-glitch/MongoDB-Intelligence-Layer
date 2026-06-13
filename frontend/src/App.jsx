@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import SchemaWar from './tabs/SchemaWar.jsx';
+import FlexibleSchema from './tabs/FlexibleSchema.jsx';
 import ModelSwap from './tabs/ModelSwap.jsx';
 import SessionMemory from './tabs/SessionMemory.jsx';
 import IntentRouting from './tabs/IntentRouting.jsx';
@@ -15,9 +15,9 @@ const TABS = [
 export default function App() {
   const [selected, setSelected] = useState(0);
 
-  // Estado dos resultados vive AQUI (lifted state): trocar de tab ou
-  // re-renderizar qualquer componente não apaga resultados de pipeline/chat.
-  const [schemaWarState, setSchemaWarState] = useState({ doc: null, flash: 0 });
+  // Result state lives HERE (lifted state): switching tabs or re-rendering
+  // any component never wipes pipeline/chat results.
+  const [schemaState, setSchemaState] = useState({ doc: null, flash: 0 });
   const [modelSwapState, setModelSwapState] = useState({ config: null, messages: [] });
   const [sessionState, setSessionState] = useState({
     sessionId: null,
@@ -26,7 +26,7 @@ export default function App() {
   });
   const [pipelineState, setPipelineState] = useState({ question: '', steps: null });
 
-  // health do cluster — alimenta o status pill e a stat bar
+  // cluster health — feeds the status pill and the stat bar
   const [health, setHealth] = useState(null);
   const [healthError, setHealthError] = useState(false);
 
@@ -52,7 +52,7 @@ export default function App() {
   }, []);
 
   const panes = [
-    <SchemaWar state={schemaWarState} setState={setSchemaWarState} />,
+    <FlexibleSchema state={schemaState} setState={setSchemaState} />,
     <ModelSwap state={modelSwapState} setState={setModelSwapState} />,
     <SessionMemory state={sessionState} setState={setSessionState} />,
     <IntentRouting state={pipelineState} setState={setPipelineState} />,
@@ -128,7 +128,7 @@ export default function App() {
       </main>
 
       <footer className="app-footer">
-        <p>MongoDB Atlas · cluster Inter · POC.produtos_vector — autoEmbed voyage-4</p>
+        <p>MongoDB Atlas · POC.produtos_vector — autoEmbed voyage-4</p>
       </footer>
     </>
   );

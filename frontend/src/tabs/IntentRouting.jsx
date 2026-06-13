@@ -9,7 +9,7 @@ import { api } from '../api.js';
 
 const json = (o) => JSON.stringify(o, null, 2);
 
-// preço por 1M tokens (input/output) — Anthropic API
+// price per 1M tokens (input/output) — Anthropic API
 const PRICES = { sonnet: { in: 3, out: 15 }, haiku: { in: 1, out: 5 } };
 const priceFor = (model) => (model?.includes('haiku') ? PRICES.haiku : PRICES.sonnet);
 
@@ -101,7 +101,7 @@ export default function IntentRouting({ state, setState }) {
     });
 
     try {
-      // 1 — intent
+      // 1 — intent classification
       const cls = await api.classify(q);
       setStep('intent', {
         status: 'done',
@@ -117,7 +117,7 @@ export default function IntentRouting({ state, setState }) {
         ),
       });
 
-      // 2 — template/variante
+      // 2 — template/variant
       setStep('template', { status: 'running', runningLabel: 'resolvendo roteamento…' });
       const route = await api.route(cls.intent);
       setStep('template', {
@@ -164,7 +164,7 @@ export default function IntentRouting({ state, setState }) {
         ),
       });
 
-      // 4 — resposta
+      // 4 — answer
       setStep('answer', { status: 'running' });
       const ans = await api.answer(q, cls.intent);
       setStep('answer', {

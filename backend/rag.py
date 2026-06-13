@@ -1,8 +1,8 @@
-"""Vector search em POC.produtos_vector (índice existente: produtos_vector).
+"""Vector search over POC.produtos_vector (existing index: produtos_vector).
 
-A collection já está vetorizada com Atlas autoEmbed (voyage-4), então o
-$vectorSearch recebe o texto cru em `query` — o Atlas embeda na hora.
-Nada aqui cria índice nem modifica documentos.
+The collection is already vectorized with Atlas autoEmbed (voyage-4), so
+$vectorSearch receives the raw text in `query` — Atlas embeds it on the fly.
+Nothing here creates an index or modifies documents.
 """
 
 import json
@@ -13,12 +13,12 @@ DEFAULT_INDEX = "produtos_vector"
 
 
 async def vector_search(question: str, rag_config: dict) -> tuple[list[dict], dict]:
-    """Retorna (docs, funnel) — funnel traz os números reais de cada estágio
-    do retrieval, para a UI mostrar o afunilamento candidatos → contexto."""
+    """Returns (docs, funnel) — funnel carries the real numbers for each
+    retrieval stage, so the UI can show the candidates → context narrowing."""
     top_k = int(rag_config.get("top_k", 5))
     min_score = float(rag_config.get("min_score", 0.0))
     num_candidates = int(rag_config.get("num_candidates", top_k * 20))
-    # path = campo de texto fonte do autoEmbed (o vetor não fica no documento)
+    # path = source text field for autoEmbed (the vector isn't stored in the document)
     path = rag_config.get("path", "descricao")
     collection = poc()[rag_config.get("collection", "produtos_vector")]
 
@@ -55,10 +55,10 @@ _KEY_FIELDS = ["nome", "marca", "modelo", "preco", "preco_original", "desconto_p
 
 
 def format_chunks(docs: list[dict], max_descricao: int = 300) -> str:
-    """Serializa os documentos recuperados para injetar no prompt ({{rag_chunks}}).
+    """Serializes the retrieved documents for injection into the prompt ({{rag_chunks}}).
 
-    Campos estruturados (preço, estoque, etc.) vêm primeiro e inteiros;
-    descricao é truncada separadamente para não sufocar os dados numéricos.
+    Structured fields (price, stock, etc.) come first and in full; descricao
+    is truncated separately so it doesn't drown out the numeric data.
     """
     parts = []
     for i, d in enumerate(docs, 1):

@@ -1,6 +1,6 @@
 import { defineConfig, devices } from '@playwright/test';
 
-// Pré-requisito: POC no ar (./start.sh) — frontend :5173 + backend :8000.
+// Prerequisite: the app is running (./start.sh) — frontend :5173 + backend :8000.
 export default defineConfig({
   testDir: 'tests/visual',
   fullyParallel: false,
@@ -14,7 +14,7 @@ export default defineConfig({
   },
   expect: {
     toHaveScreenshot: {
-      // tolerância para antialiasing de fontes entre máquinas
+      // tolerance for font antialiasing differences across machines
       maxDiffPixelRatio: 0.02,
     },
   },

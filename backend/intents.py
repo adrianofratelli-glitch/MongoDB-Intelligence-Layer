@@ -1,7 +1,7 @@
-"""Classificação de intent (Haiku, JSON estruturado) + resolução de roteamento.
+"""Intent classification (Haiku, structured JSON) + routing resolution.
 
-Todo o roteamento mora em documentos: o intent aponta para um prompt_template
-e carrega o rag_config. Mudar a estratégia é um update, não um deploy.
+All routing lives in documents: the intent points to a prompt_template and
+carries the rag_config. Changing the strategy is an update, not a deploy.
 """
 
 import json
@@ -22,7 +22,7 @@ async def list_intents() -> list[dict]:
 
 
 async def classify_intent(question: str) -> dict:
-    """Chamada rápida ao Haiku com os intents disponíveis; retorna {intent, confidence}."""
+    """Quick Haiku call with the available intents; returns {intent, confidence}."""
     intents = await list_intents()
     if not intents:
         raise SafeQueryError("config", "intent_registry vazio. Rode backend/seed.py.")
@@ -70,7 +70,7 @@ async def classify_intent(question: str) -> dict:
 
 
 async def resolve_routing(intent_id: str, active_model: str) -> dict:
-    """Resolve intent → template → variante para o modelo ativo."""
+    """Resolves intent → template → variant for the active model."""
     intent_doc = await safe_query(
         ai_brain()["intent_registry"].find_one({"_id": intent_id}, max_time_ms=MAX_TIME_MS)
     )
@@ -91,7 +91,7 @@ async def resolve_routing(intent_id: str, active_model: str) -> dict:
     variant = variants.get(active_model)
     variant_model = active_model
     if variant is None and variants:
-        # modelo ativo sem variante dedicada → usa a primeira disponível
+        # active model has no dedicated variant → fall back to the first available
         variant_model, variant = next(iter(variants.items()))
 
     return {

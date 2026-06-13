@@ -1,4 +1,4 @@
-/** Steps do pipeline: pendente (cinza) → rodando (spinner) → concluído (check verde). */
+/** Pipeline steps: pending (gray) → running (spinner) → done (green check). */
 export default function PipelineSteps({ steps }) {
   return (
     <div>

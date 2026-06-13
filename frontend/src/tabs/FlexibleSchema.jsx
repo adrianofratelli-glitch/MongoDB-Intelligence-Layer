@@ -82,7 +82,7 @@ const CONCERNS = [
   },
 ];
 
-// Race: o mesmo "modelo novo entrou em produção" nos dois mundos
+// Race: the same "new model shipped to production" in both worlds
 const RACE_MDB = [
   'update_one: $set da variante nova',
   'Backend lê o doc no próximo request',
@@ -101,7 +101,7 @@ const RACE_ALT = [
 ];
 
 function FlowRace() {
-  const [mdbState, setMdbState] = useState([]); // 'active' | 'done' por índice
+  const [mdbState, setMdbState] = useState([]); // 'active' | 'done' per index
   const [altState, setAltState] = useState([]);
   const [running, setRunning] = useState(false);
   const [doneSides, setDoneSides] = useState({ mdb: false, alt: false });
@@ -174,7 +174,7 @@ function FlowRace() {
   );
 }
 
-export default function SchemaWar({ state, setState }) {
+export default function FlexibleSchema({ state, setState }) {
   const { doc, flash } = state;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);

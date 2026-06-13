@@ -1,5 +1,5 @@
-// Cliente HTTP. Erros do backend chegam como {error: {kind, message}} (503)
-// e viram ApiError — a UI mostra em Banner amarelo, nunca stack trace.
+// HTTP client. Backend errors arrive as {error: {kind, message}} (503) and
+// become ApiError — the UI shows them in a yellow Banner, never a stack trace.
 
 export class ApiError extends Error {
   constructor(kind, message) {

@@ -1,9 +1,9 @@
 """FastAPI — MongoDB Intelligence Layer POC.
 
 Tabs:
-  1. Schema War      → /api/templates, /api/templates/{id}/variant
-  2. Model Swap      → /api/model-config, /api/model-config/swap, /api/chat/quick
-  3. Session Memory  → /api/sessions...
+  1. Flexible schema → /api/templates, /api/templates/{id}/variant
+  2. Model swap      → /api/model-config, /api/model-config/swap, /api/chat/quick
+  3. Session memory  → /api/sessions...
   4. Intent + RAG    → /api/pipeline/classify | route | search | answer
 """
 
@@ -36,7 +36,7 @@ async def safe_query_handler(_: Request, exc: SafeQueryError):
 
 
 def clean(doc):
-    """ObjectId/datetime → string para JSON."""
+    """ObjectId/datetime → string for JSON."""
     if isinstance(doc, list):
         return [clean(d) for d in doc]
     if isinstance(doc, dict):
@@ -67,7 +67,7 @@ async def health():
     }
 
 
-# ---------- Tab 1: Schema War ----------
+# ---------- Tab 1: Flexible schema ----------
 
 @app.get("/api/templates")
 async def list_templates():
@@ -89,7 +89,7 @@ class VariantBody(BaseModel):
 
 @app.post("/api/templates/{template_id}/variant")
 async def add_variant(template_id: str, body: VariantBody):
-    """$set real no Atlas: adiciona uma variante nova ao documento — zero migration."""
+    """Real $set on Atlas: adds a new variant to the document — zero migration."""
     variant = {
         "system": f"Você é um assistente de catálogo otimizado para {body.model_name}.",
         "user_template": "Contexto: {{rag_chunks}}\n\nPergunta: {{question}}",
@@ -111,7 +111,7 @@ async def add_variant(template_id: str, body: VariantBody):
 
 @app.delete("/api/templates/{template_id}/variant/{model_name}")
 async def remove_variant(template_id: str, model_name: str):
-    """Reset da demo: $unset da variante adicionada ao vivo."""
+    """Demo reset: $unset the variant added live."""
     await safe_query(
         ai_brain()["prompt_templates"].update_one(
             {"_id": template_id},
@@ -130,7 +130,7 @@ async def model_config():
 
 @app.post("/api/model-config/swap")
 async def swap_models():
-    """update_one real: inverte primary ↔ fallback. O backend lê o doc a cada request."""
+    """Real update_one: swaps primary ↔ fallback. The backend reads the doc on every request."""
     cfg = await get_active_config()
     await safe_query(
         ai_brain()["model_config"].update_one(
@@ -191,7 +191,7 @@ class SessionChatBody(BaseModel):
 
 @app.post("/api/sessions/{session_id}/chat")
 async def session_chat(session_id: str, body: SessionChatBody):
-    """Cada turno é um $push no array turns — memória conversacional nativa, sem JOIN."""
+    """Each turn is a $push onto the turns array — native conversational memory, no JOIN."""
     coll = ai_brain()["session_memory"]
     oid = ObjectId(session_id)
     doc = await safe_query(coll.find_one({"_id": oid}, max_time_ms=MAX_TIME_MS))
@@ -201,7 +201,7 @@ async def session_chat(session_id: str, body: SessionChatBody):
     turns = doc.get("turns", [])
     next_turn = len(turns) + 1
 
-    # histórico (últimos 10 turnos) vem direto do array do documento
+    # history (last 10 turns) comes straight from the document's array
     history = [
         {"role": t["role"], "content": t["content"]}
         for t in turns[-10:]
@@ -280,7 +280,7 @@ async def pipeline_search(body: SearchBody):
     cfg = await get_active_config()
     routing = await resolve_routing(body.intent, cfg["primary"]["model"])
     chunks, funnel = await vector_search(body.question, routing["rag_config"])
-    # estimativa de tokens do contexto injetado (~4 chars/token)
+    # token estimate for the injected context (~4 chars/token)
     funnel["context_tokens_est"] = len(format_chunks(chunks)) // 4
     return clean({"chunks": chunks, "rag_config": routing["rag_config"], "funnel": funnel})
 

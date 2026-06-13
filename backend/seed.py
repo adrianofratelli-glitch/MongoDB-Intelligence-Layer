@@ -1,7 +1,7 @@
-"""Popula o database ai_brain (prompt_templates, model_config, intent_registry).
+"""Populates the ai_brain database (prompt_templates, model_config, intent_registry).
 
-session_memory é criada em runtime pelo chat. Idempotente: usa replace_one
-com upsert, pode rodar quantas vezes quiser.
+session_memory is created at runtime by the chat. Idempotent: uses replace_one
+with upsert, so it can be run as many times as you like.
 
     python seed.py
 """
@@ -18,20 +18,20 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 NOW = datetime.now(timezone.utc)
 
-# rag_config padrão — collection de 200K produtos já vetorizada (autoEmbed voyage-4).
-# NÃO criamos índices nem alteramos documentos dela; só lemos via $vectorSearch.
+# default rag_config — collection of 200K products already vectorized (autoEmbed voyage-4).
+# We do NOT create indexes or modify its documents; we only read via $vectorSearch.
 RAG_BASE = {
     "database": "POC",
     "collection": "produtos_vector",
     "index": "produtos_vector",
-    "path": "descricao",  # campo fonte do autoEmbed (voyage-4) — confirmado na definição do índice
+    "path": "descricao",  # source field for autoEmbed (voyage-4) — confirmed in the index definition
     "num_candidates": 100,
     "top_k": 5,
     "min_score": 0.5,
 }
 
-# As variantes têm estruturas DIFERENTES entre si de propósito — esse é o ponto
-# da demo: documentos polimórficos não precisam de migration para divergir.
+# The variants have DIFFERENT structures from one another on purpose — that's the
+# point of the demo: polymorphic documents need no migration to diverge.
 PROMPT_TEMPLATES = [
     {
         "_id": "tmpl_product_assistant_v2",
@@ -61,7 +61,7 @@ PROMPT_TEMPLATES = [
         "name": "product_comparator",
         "version": 1,
         "variants": {
-            # Sonnet: estrutura rica com few-shot e formato de saída
+            # Sonnet: rich structure with few-shot and output format
             "claude-sonnet-4-5": {
                 "system": (
                     "Você compara produtos de um marketplace. Monte uma tabela "
@@ -78,7 +78,7 @@ PROMPT_TEMPLATES = [
                 ],
                 "output_format": "markdown_table",
             },
-            # Haiku: estrutura enxuta, campos diferentes — sem ALTER TABLE
+            # Haiku: lean structure, different fields — no ALTER TABLE
             "claude-haiku-4-5": {
                 "system": "Comparador de produtos. Direto ao ponto.",
                 "user_template": (

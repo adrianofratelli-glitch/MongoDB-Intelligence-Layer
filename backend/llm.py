@@ -1,8 +1,8 @@
-"""Wrapper Anthropic.
+"""Anthropic wrapper.
 
-Regra central da demo: o model_config é lido do Atlas A CADA chamada (zero
-cache). Trocar o documento no banco troca o modelo da aplicação ao vivo,
-sem restart e sem deploy.
+Core rule of the demo: model_config is read from Atlas on EVERY call (zero
+caching). Swapping the document in the database swaps the application's model
+live, with no restart and no deploy.
 """
 
 import time
@@ -11,7 +11,7 @@ from anthropic import APIError, AsyncAnthropic
 
 from db import MAX_TIME_MS, SafeQueryError, ai_brain, safe_query
 
-client = AsyncAnthropic()  # lê ANTHROPIC_API_KEY do ambiente
+client = AsyncAnthropic()  # reads ANTHROPIC_API_KEY from the environment
 
 
 async def get_active_config() -> dict:
@@ -27,7 +27,7 @@ async def get_active_config() -> dict:
 
 
 async def call_model(model_cfg: dict, system: str, messages: list[dict]) -> dict:
-    """Uma chamada ao modelo descrito por model_cfg ({model, temperature, max_tokens})."""
+    """A single call to the model described by model_cfg ({model, temperature, max_tokens})."""
     start = time.perf_counter()
     resp = await client.messages.create(
         model=model_cfg["model"],
@@ -48,7 +48,7 @@ async def call_model(model_cfg: dict, system: str, messages: list[dict]) -> dict
 
 
 async def call_with_fallback(system: str, messages: list[dict]) -> dict:
-    """Lê model_config agora, tenta o primary e cai para o fallback em erro de API."""
+    """Reads model_config now, tries the primary and falls back on an API error."""
     cfg = await get_active_config()
     try:
         result = await call_model(cfg["primary"], system, messages)

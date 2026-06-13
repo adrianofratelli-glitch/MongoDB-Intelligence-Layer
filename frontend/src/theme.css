@@ -15,7 +15,7 @@
   --cyan: #06b6d4;
   --teal: #14b8a6;
 
-  /* aliases legados usados pelos tabs */
+  /* legacy aliases used by the tabs */
   --mdb-bg: var(--bg-primary);
   --mdb-bg-card: var(--bg-card);
   --mdb-green: var(--accent);
@@ -45,7 +45,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* dot-grid + glow de fundo */
+/* dot-grid + background glow */
 body::before {
   content: '';
   position: fixed;
@@ -223,7 +223,7 @@ nav.top-nav {
   margin-bottom: 2rem;
 }
 
-/* ---------- stat bar (substitui o sidebar) ---------- */
+/* ---------- stat bar (replaces the sidebar) ---------- */
 
 .stat-bar {
   display: flex;
@@ -329,7 +329,7 @@ nav.top-nav {
   color: var(--text-pri);
 }
 
-/* ---------- utilitários / layout ---------- */
+/* ---------- utilities / layout ---------- */
 
 .two-col {
   display: grid;
@@ -366,7 +366,7 @@ nav.top-nav {
   font-size: 13px;
 }
 
-/* destaque verde temporário (turno novo / doc atualizado) */
+/* temporary green highlight (new turn / updated doc) */
 @keyframes flashGreen {
   0% {
     background: rgba(0, 237, 100, 0.25);
@@ -524,7 +524,7 @@ footer.app-footer p {
   font-family: 'JetBrains Mono';
 }
 
-/* ---------- funil de retrieval (Tab 4) ---------- */
+/* ---------- retrieval funnel (Tab 4) ---------- */
 
 .funnel-stage {
   display: flex;
@@ -599,7 +599,7 @@ footer.app-footer p {
   letter-spacing: 0.06em;
 }
 
-/* ---------- race lado a lado (Tab 1) ---------- */
+/* ---------- side-by-side race (Tab 1) ---------- */
 
 .flow-grid {
   display: grid;

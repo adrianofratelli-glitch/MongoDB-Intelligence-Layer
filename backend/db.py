@@ -1,7 +1,7 @@
-"""Conexão com o Atlas + helper safe_query.
+"""Atlas connection + safe_query helper.
 
-Toda leitura passa por maxTimeMS=10s. Erros operacionais viram SafeQueryError
-com mensagem amigável — o frontend renderiza em Banner, nunca stack trace.
+Every read goes through maxTimeMS=10s. Operational errors become a SafeQueryError
+with a user-friendly message — the frontend renders it in a Banner, never a stack trace.
 """
 
 import os
@@ -52,7 +52,7 @@ def poc():
 
 
 class SafeQueryError(Exception):
-    """Erro operacional com mensagem pronta para a UI."""
+    """Operational error carrying a UI-ready message."""
 
     def __init__(self, kind: str, message: str):
         self.kind = kind
@@ -61,10 +61,10 @@ class SafeQueryError(Exception):
 
 
 async def safe_query(awaitable):
-    """Aguarda uma operação Motor mapeando falhas para mensagens amigáveis.
+    """Awaits a Motor operation, mapping failures to user-friendly messages.
 
-    O maxTimeMS é passado em cada chamada (find/aggregate); aqui tratamos o
-    que escapa: timeout, índice de busca ausente, mongot reiniciando, rede.
+    maxTimeMS is passed on each call (find/aggregate); here we handle what
+    slips through: timeouts, missing search index, mongot restarting, network.
     """
     try:
         return await awaitable
