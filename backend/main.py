@@ -21,7 +21,7 @@ from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 from pydantic import BaseModel
 
-from agent import SCENARIOS, mcp_server_params, run_agent
+from agent import SCENARIOS, WRITE_TOOLS, list_agent_tools, mcp_server_params, run_agent
 from db import MAX_TIME_MS, SafeQueryError, ai_brain, get_client, safe_query
 from intents import classify_intent, render_user_prompt, resolve_routing
 from llm import call_with_fallback, get_active_config
@@ -349,9 +349,25 @@ async def agent_scenarios():
     }
 
 
+@app.get("/api/agent/tools")
+async def agent_tools(request: Request):
+    """The MongoDB tools the agent has available through the MCP Server."""
+    session = getattr(request.app.state, "mcp", None)
+    if session is None:
+        return {"tools": []}
+    tools = await list_agent_tools(session)
+    return {
+        "tools": [
+            {"name": t["name"], "kind": "write" if t["name"] in WRITE_TOOLS else "read"}
+            for t in tools
+        ]
+    }
+
+
 class AgentRunBody(BaseModel):
     scenario: str | None = None
     message: str | None = None
+    conversation_id: str | None = None
 
 
 @app.post("/api/agent/run")
@@ -364,8 +380,16 @@ async def agent_run(request: Request, body: AgentRunBody):
             "O MongoDB MCP Server não está disponível. "
             "Confira se o Node/npx está instalado e o cluster acessível. " + detail,
         )
+    conversation_id = body.conversation_id or f"conv_{int(datetime.now(timezone.utc).timestamp())}"
     try:
-        return clean(await run_agent(session, scenario=body.scenario, message=body.message))
+        return clean(
+            await run_agent(
+                session,
+                scenario=body.scenario,
+                message=body.message,
+                conversation_id=conversation_id,
+            )
+        )
     except SafeQueryError:
         raise
     except Exception as exc:  # noqa: BLE001

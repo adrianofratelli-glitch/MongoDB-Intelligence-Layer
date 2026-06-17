@@ -73,6 +73,7 @@ export const api = {
 
   // Tab 3 — Agent (autonomous loop via MongoDB MCP Server)
   agentScenarios: () => request('/api/agent/scenarios'),
+  agentTools: () => request('/api/agent/tools'),
   agentRun: (body) =>
     request('/api/agent/run', { method: 'POST', body: JSON.stringify(body) }),
 };

@@ -22,7 +22,9 @@ The production model is a document (`model_config`), read on every request. Swit
 ![Model swap](docs/img/tab2-model-swap.png)
 
 ### Tab 3 — The agent (Powered by MongoDB MCP Server)
-An autonomous support agent runs a **real tool-use loop**: Claude decides which MongoDB tools to call — `find` an order, `$vectorSearch` the catalog for replacements, `update` a status — and they are executed against Atlas through the **MongoDB MCP Server**. The run is recorded and replayed step by step across the `Perceive → Retrieve → Reason → Act → Store → Loop` phases, with real read/write/latency counters. This single tab tells the whole "MongoDB as the agent's data layer" story (retrieval, memory, and writes), so it absorbs what used to be separate memory and RAG tabs.
+An autonomous support agent runs a **real tool-use loop**: the model decides which MongoDB tools to call — `find` an order, `$vectorSearch` the catalog for replacements, `update` a status — and they are executed against Atlas through the **MongoDB MCP Server** (the available tools are shown in a panel, lit up as they are used). The run is recorded and replayed step by step across the `Perceive → Retrieve → Reason → Act → Store → Loop` phases, with real read/write/latency counters.
+
+**Session memory lives in a document.** Every turn is `$push`-ed to `POC.agent_sessions`. Because each run is a stateless request, the agent can only recall earlier turns by querying that document — so asking it to *"consolidate the questions I've asked"* triggers a real `find` on `agent_sessions`, making the persistence visible as a MongoDB operation. This single tab tells the whole "MongoDB as the agent's data layer" story (retrieval, memory, and writes), so it absorbs what used to be separate memory and RAG tabs.
 
 ![The agent](docs/img/tab3-agent.png)
 

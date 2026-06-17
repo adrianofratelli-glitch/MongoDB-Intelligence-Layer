@@ -17,7 +17,13 @@ export default function App() {
   // any component never wipes pipeline/chat results.
   const [schemaState, setSchemaState] = useState({ doc: null, flash: 0 });
   const [modelSwapState, setModelSwapState] = useState({ config: null, messages: [] });
-  const [agentState, setAgentState] = useState({ run: null, step: -1, iteration: 0 });
+  const [agentState, setAgentState] = useState({
+    run: null,
+    step: -1,
+    iteration: 0,
+    conversationId: null,
+    turns: [],
+  });
 
   // cluster health — feeds the status pill and the stat bar
   const [health, setHealth] = useState(null);

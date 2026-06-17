@@ -136,11 +136,33 @@ def _clean_for_display(text: str) -> str:
     return text.strip()
 
 
-async def run_agent(session: ClientSession, *, scenario: str | None, message: str | None) -> dict:
+def _memory_note(conversation_id: str) -> str:
+    """Per-run system note: where the session memory lives and how to recall it."""
+    return (
+        "\n\nMemória da sessão: o histórico desta conversa fica salvo no MongoDB em "
+        f'POC.agent_sessions (session_id="{conversation_id}"). Se o cliente pedir para '
+        "recuperar, listar ou CONSOLIDAR as perguntas/mensagens anteriores desta "
+        "sessão, use a ferramenta find em POC.agent_sessions com o filtro "
+        f'{{"session_id": "{conversation_id}"}} para buscar o histórico salvo e '
+        "responda a partir dele (não invente — use o que veio do documento)."
+    )
+
+
+async def run_agent(
+    session: ClientSession,
+    *,
+    scenario: str | None,
+    message: str | None,
+    conversation_id: str,
+) -> dict:
     """Run one real agentic turn and return a replayable trace.
 
     The trace is an ordered list of events tagged with a phase; the frontend
     steps through them. Every tool call hits Atlas through the MCP Server.
+
+    Conversation memory is persisted to POC.agent_sessions ($push). Because each
+    run is a stateless request, the agent can only recall earlier turns by
+    querying that document — which is exactly the persistence story.
     """
     if scenario and scenario in SCENARIOS:
         user_msg = SCENARIOS[scenario]["message"]
@@ -151,6 +173,7 @@ async def run_agent(session: ClientSession, *, scenario: str | None, message: st
 
     client = AsyncAnthropic()
     tools = await list_agent_tools(session)
+    system = SYSTEM + _memory_note(conversation_id)
 
     trace: list[dict] = []
     metrics = {"reads": 0, "writes": 0, "tools_used": 0, "latency_ms": 0}
@@ -169,7 +192,7 @@ async def run_agent(session: ClientSession, *, scenario: str | None, message: st
         resp = await client.messages.create(
             model=AGENT_MODEL,
             max_tokens=1200,
-            system=SYSTEM,
+            system=system,
             tools=tools,
             messages=messages,
         )
@@ -219,22 +242,35 @@ async def run_agent(session: ClientSession, *, scenario: str | None, message: st
             )
         messages.append({"role": "user", "content": tool_results})
 
-    # Store — persist the resolution so the next turn has memory (a real write)
+    # Store — append this turn to the session document ($push). The growing
+    # turns[] array IS the conversation memory, persisted in MongoDB.
     sg0 = time.perf_counter()
-    resolution = {
-        "scenario": scenario,
-        "customer_message": user_msg,
-        "agent_answer": final_answer,
-        "reads": metrics["reads"],
-        "writes": metrics["writes"],
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    await poc()["support_sessions"].insert_one(dict(resolution))
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    coll = poc()["agent_sessions"]
+    await coll.update_one(
+        {"session_id": conversation_id},
+        {
+            "$push": {
+                "turns": {
+                    "$each": [
+                        {"role": "user", "content": user_msg, "at": now},
+                        {"role": "assistant", "content": final_answer, "at": now},
+                    ]
+                }
+            },
+            "$setOnInsert": {"session_id": conversation_id, "created_at": now},
+            "$set": {"updated_at": now},
+        },
+        upsert=True,
+    )
+    doc = await coll.find_one({"session_id": conversation_id}, {"turns": 1})
+    turn_count = len(doc.get("turns", [])) if doc else 2
     metrics["writes"] += 1
     metrics["latency_ms"] += int((time.perf_counter() - sg0) * 1000)
-    emit("store", "tool_call", actor="mongodb", tool="insert-one",
-         args={"database": "POC", "collection": "support_sessions"},
-         result="Resolução salva em support_sessions (memória da conversa).",
+    emit("store", "tool_call", actor="mongodb", tool="update-one ($push)",
+         args={"database": "POC", "collection": "agent_sessions",
+               "filter": {"session_id": conversation_id}},
+         result=f"Turno salvo em agent_sessions — {turn_count} mensagens na memória da sessão.",
          reads=metrics["reads"], writes=metrics["writes"])
 
     # Agent final reply + Loop marker
@@ -245,6 +281,8 @@ async def run_agent(session: ClientSession, *, scenario: str | None, message: st
         "scenario": scenario,
         "user_message": user_msg,
         "answer": final_answer,
+        "conversation_id": conversation_id,
+        "turn_count": turn_count,
         "trace": trace,
         "metrics": metrics,
         "model": AGENT_MODEL,

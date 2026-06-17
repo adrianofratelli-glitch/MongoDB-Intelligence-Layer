@@ -20,7 +20,7 @@ const PHASE_CAPTION = {
   retrieve: 'O agente consulta o MongoDB pelo MCP Server (find / $vectorSearch).',
   reason: 'O Claude raciocina sobre qual será a próxima ação.',
   act: 'O agente grava a decisão no MongoDB (update do pedido).',
-  store: 'A resolução é salva — vira memória para o próximo turno.',
+  store: 'O turno é salvo em agent_sessions — memória persistida da conversa.',
   loop: 'Turno concluído. O agente está pronto para continuar a conversa.',
 };
 
@@ -29,12 +29,7 @@ const short = (obj, n = 160) => {
   return s.length > n ? s.slice(0, n) + '…' : s;
 };
 
-// Resumo legível dos argumentos de uma operação MongoDB
-const opTarget = (args = {}) => {
-  const db = args.database ?? '?';
-  const coll = args.collection ?? '?';
-  return `${db}.${coll}`;
-};
+const opTarget = (args = {}) => `${args.database ?? '?'}.${args.collection ?? '?'}`;
 const opDetail = (args = {}) => {
   if (args.pipeline) return short(args.pipeline, 200);
   if (args.filter) return 'filter: ' + short(args.filter, 140);
@@ -43,8 +38,9 @@ const opDetail = (args = {}) => {
 };
 
 export default function Agent({ state, setState }) {
-  const { run, step, iteration } = state;
+  const { run, step, iteration, conversationId, turns = [] } = state;
   const [scenarios, setScenarios] = useState([]);
+  const [tools, setTools] = useState([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -54,6 +50,7 @@ export default function Agent({ state, setState }) {
 
   useEffect(() => {
     api.agentScenarios().then((d) => setScenarios(d.scenarios)).catch(() => {});
+    api.agentTools().then((d) => setTools(d.tools)).catch(() => {});
   }, []);
 
   const events = run?.trace ?? [];
@@ -83,9 +80,21 @@ export default function Agent({ state, setState }) {
     setError(null);
     setPlaying(false);
     setWalk(false);
+    const convId = conversationId ?? `conv_${Date.now()}`;
     try {
-      const result = await api.agentRun(payload);
-      setState((s) => ({ run: result, step: 0, iteration: (s.iteration ?? 0) + 1 }));
+      const result = await api.agentRun({ ...payload, conversation_id: convId });
+      setState((s) => ({
+        ...s,
+        conversationId: result.conversation_id ?? convId,
+        run: result,
+        step: 0,
+        iteration: (s.iteration ?? 0) + 1,
+        turns: [
+          ...(s.turns ?? []),
+          { role: 'user', text: result.user_message },
+          { role: 'agent', text: result.answer },
+        ],
+      }));
       setPlaying(true); // auto-reproduz o trace
     } catch (e) {
       setError(e.message);
@@ -100,11 +109,20 @@ export default function Agent({ state, setState }) {
     setInput('');
   };
 
+  // Reset: limpa só o replay atual; a conversa (memória) permanece
   const reset = () => {
     clearTimeout(timerRef.current);
     setPlaying(false);
     setWalk(false);
-    setState({ run: null, step: -1, iteration: iteration ?? 0 });
+    setState((s) => ({ ...s, run: null, step: -1 }));
+  };
+
+  // Nova conversa: sessão nova — zera memória e replay
+  const newConversation = () => {
+    clearTimeout(timerRef.current);
+    setPlaying(false);
+    setWalk(false);
+    setState({ run: null, step: -1, iteration: 0, conversationId: null, turns: [] });
   };
 
   const go = (n) => {
@@ -124,9 +142,7 @@ export default function Agent({ state, setState }) {
 
   const ops = visible.filter((e) => e.kind === 'tool_call');
   const reasonings = visible.filter((e) => e.kind === 'reasoning');
-  const chat = visible.filter(
-    (e) => e.kind === 'message' && (e.actor === 'user' || e.actor === 'agent'),
-  );
+  const usedTools = new Set(ops.map((e) => e.tool));
   const thought = [...reasonings].reverse()[0]?.text;
 
   return (
@@ -171,6 +187,26 @@ export default function Agent({ state, setState }) {
             >
               📖 Tour guiado
             </Button>
+          </div>
+        </div>
+
+        {/* ferramentas MCP disponíveis + memória da sessão */}
+        <div className="agent-meta">
+          <div className="tools-row">
+            <span className="dim mono">Ferramentas MCP:</span>
+            {tools.map((t) => (
+              <span
+                key={t.name}
+                className={`tool-pill ${t.kind} ${usedTools.has(t.name) ? 'used' : ''}`}
+                title={usedTools.has(t.name) ? 'usada neste turno' : 'disponível'}
+              >
+                {t.name}
+              </span>
+            ))}
+          </div>
+          <div className="memory-pill" title="POC.agent_sessions">
+            🧠 <span className="accent-num">{turns.length}</span> mensagens na memória
+            <Button size="xsmall" darkMode onClick={newConversation} disabled={busy}>Nova conversa</Button>
           </div>
         </div>
 
@@ -234,10 +270,13 @@ export default function Agent({ state, setState }) {
               <div className="thought-text">{thought ?? 'Aguardando entrada do usuário…'}</div>
             </div>
             <div className="agent-chat">
-              {chat.length === 0 && <div className="dim">Sem mensagens ainda. Experimente uma sugestão abaixo.</div>}
-              {chat.map((e, i) => (
-                <div key={i} className={`chat-msg ${e.actor === 'user' ? 'user' : 'assistant'}`}>{e.text}</div>
+              {turns.length === 0 && <div className="dim">Sem mensagens ainda. Experimente uma sugestão abaixo.</div>}
+              {turns.map((t, i) => (
+                <div key={i} className={`chat-msg ${t.role === 'user' ? 'user' : 'assistant'}`}>{t.text}</div>
               ))}
+              {busy && (
+                <div className="row"><div className="spinner" /> <span className="dim">o agente está trabalhando…</span></div>
+              )}
             </div>
             <div className="row" style={{ marginTop: 10 }}>
               <div style={{ flex: 1 }}>
@@ -260,6 +299,14 @@ export default function Agent({ state, setState }) {
                   {s.label}
                 </button>
               ))}
+              <button
+                className="agent-chip memory"
+                onClick={() => runScenario({ message: 'Pode consolidar todas as perguntas que eu fiz nesta sessão?' })}
+                disabled={busy || turns.length === 0}
+                title="Demonstra a persistência: o agente faz um find em agent_sessions"
+              >
+                🧠 Consolidar minhas perguntas
+              </button>
             </div>
           </div>
         </div>
