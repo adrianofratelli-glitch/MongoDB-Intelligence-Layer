@@ -3,24 +3,51 @@
 Tabs:
   1. Flexible schema → /api/templates, /api/templates/{id}/variant
   2. Model swap      → /api/model-config, /api/model-config/swap, /api/chat/quick
-  3. Session memory  → /api/sessions...
-  4. Intent + RAG    → /api/pipeline/classify | route | search | answer
+  3. Agent           → /api/agent/scenarios | run  (autonomous loop via MongoDB MCP Server)
+
+Legacy endpoints kept for reference (folded into the agent on the frontend):
+  /api/sessions...        — session memory
+  /api/pipeline/...       — intent routing + RAG
 """
 
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 
 from bson import ObjectId
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from mcp import ClientSession
+from mcp.client.stdio import stdio_client
 from pydantic import BaseModel
 
+from agent import SCENARIOS, mcp_server_params, run_agent
 from db import MAX_TIME_MS, SafeQueryError, ai_brain, get_client, safe_query
 from intents import classify_intent, render_user_prompt, resolve_routing
 from llm import call_with_fallback, get_active_config
 from rag import format_chunks, vector_search
 
-app = FastAPI(title="MongoDB Intelligence Layer")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Open one long-lived MongoDB MCP Server session and reuse it across requests.
+
+    If the MCP Server can't start (npx missing, Atlas unreachable), the app still
+    boots — only the agent endpoint reports the failure, via a friendly Banner.
+    """
+    app.state.mcp = None
+    async with AsyncExitStack() as stack:
+        try:
+            read, write = await stack.enter_async_context(stdio_client(mcp_server_params()))
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+            app.state.mcp = session
+        except Exception as exc:  # noqa: BLE001 — keep the app usable without the agent
+            app.state.mcp_error = str(exc)
+        yield
+
+
+app = FastAPI(title="MongoDB Intelligence Layer", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -58,6 +85,12 @@ async def health():
     counts = {}
     for coll in AI_BRAIN_COLLECTIONS:
         counts[coll] = await safe_query(db[coll].count_documents({}, maxTimeMS=MAX_TIME_MS))
+    # support_orders lives in POC and powers the agent tab
+    from db import poc
+
+    counts["support_orders"] = await safe_query(
+        poc()["support_orders"].count_documents({}, maxTimeMS=MAX_TIME_MS)
+    )
     cfg = await get_active_config()
     return {
         "ping": "ok",
@@ -302,3 +335,38 @@ async def pipeline_answer(body: AnswerBody):
         messages=[{"role": "user", "content": user_prompt}],
     )
     return clean({"answer": result, "chunks_used": len(chunks), "funnel": funnel})
+
+
+# ---------- Tab 3: Agent (autonomous loop via MongoDB MCP Server) ----------
+
+@app.get("/api/agent/scenarios")
+async def agent_scenarios():
+    return {
+        "scenarios": [
+            {"key": key, "label": s["label"], "message": s["message"]}
+            for key, s in SCENARIOS.items()
+        ]
+    }
+
+
+class AgentRunBody(BaseModel):
+    scenario: str | None = None
+    message: str | None = None
+
+
+@app.post("/api/agent/run")
+async def agent_run(request: Request, body: AgentRunBody):
+    session = getattr(request.app.state, "mcp", None)
+    if session is None:
+        detail = getattr(request.app.state, "mcp_error", "")
+        raise SafeQueryError(
+            "mcp",
+            "O MongoDB MCP Server não está disponível. "
+            "Confira se o Node/npx está instalado e o cluster acessível. " + detail,
+        )
+    try:
+        return clean(await run_agent(session, scenario=body.scenario, message=body.message))
+    except SafeQueryError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise SafeQueryError("agente", f"Falha ao executar o agente: {exc}")

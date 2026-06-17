@@ -1,15 +1,13 @@
 import { useEffect, useState } from 'react';
 import FlexibleSchema from './tabs/FlexibleSchema.jsx';
 import ModelSwap from './tabs/ModelSwap.jsx';
-import SessionMemory from './tabs/SessionMemory.jsx';
-import IntentRouting from './tabs/IntentRouting.jsx';
+import Agent from './tabs/Agent.jsx';
 import { api } from './api.js';
 
 const TABS = [
   '01 · Schema Flexível',
-  '02 · Model Swap',
-  '03 · Session Memory',
-  '04 · Intent + RAG',
+  '02 · Model Swap & Custo',
+  '03 · Agente',
 ];
 
 export default function App() {
@@ -19,12 +17,7 @@ export default function App() {
   // any component never wipes pipeline/chat results.
   const [schemaState, setSchemaState] = useState({ doc: null, flash: 0 });
   const [modelSwapState, setModelSwapState] = useState({ config: null, messages: [] });
-  const [sessionState, setSessionState] = useState({
-    sessionId: null,
-    doc: null,
-    lastTurn: 0,
-  });
-  const [pipelineState, setPipelineState] = useState({ question: '', steps: null });
+  const [agentState, setAgentState] = useState({ run: null, step: -1, iteration: 0 });
 
   // cluster health — feeds the status pill and the stat bar
   const [health, setHealth] = useState(null);
@@ -54,8 +47,7 @@ export default function App() {
   const panes = [
     <FlexibleSchema state={schemaState} setState={setSchemaState} />,
     <ModelSwap state={modelSwapState} setState={setModelSwapState} />,
-    <SessionMemory state={sessionState} setState={setSessionState} />,
-    <IntentRouting state={pipelineState} setState={setPipelineState} />,
+    <Agent state={agentState} setState={setAgentState} />,
   ];
 
   const counts = health?.counts ?? {};
@@ -91,8 +83,8 @@ export default function App() {
           A camada de AI vive em <span>documentos</span>
         </h1>
         <p className="page-subtitle">
-          Prompts, memória de sessão, roteamento de intents e configuração de modelos
-          mudam na velocidade dos LLMs — em MongoDB isso é um simples update.
+          Schema de prompts, configuração de modelos e a memória de um agente
+          autônomo vivem como documentos — e evoluem com um simples update.
         </p>
 
         <div className="stat-bar">
@@ -101,12 +93,12 @@ export default function App() {
             <div className="stat-label">prompt_templates</div>
           </div>
           <div className="stat-item">
-            <div className="stat-val accent">{counts.intent_registry ?? '—'}</div>
-            <div className="stat-label">intent_registry</div>
+            <div className="stat-val accent">{counts.model_config ?? '—'}</div>
+            <div className="stat-label">model_config</div>
           </div>
           <div className="stat-item">
-            <div className="stat-val accent">{counts.session_memory ?? '—'}</div>
-            <div className="stat-label">session_memory</div>
+            <div className="stat-val accent">{counts.support_orders ?? '—'}</div>
+            <div className="stat-label">support_orders</div>
           </div>
           <div className="stat-item">
             <div className="stat-val">200K</div>

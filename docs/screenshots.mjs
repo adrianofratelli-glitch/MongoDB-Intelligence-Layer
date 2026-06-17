@@ -1,4 +1,4 @@
-// Captures screenshots of the four POC tabs for the README.
+// Captures screenshots of the three POC tabs for the README.
 // Usage: node docs/screenshots.mjs  (frontend on :5173 and backend on :8000)
 import { chromium } from 'playwright';
 
@@ -25,26 +25,20 @@ await chatInput.press('Enter');
 await page.waitForTimeout(12000);
 await page.screenshot({ path: OUT + 'tab2-model-swap.png' });
 
-// Tab 3 — Session memory: two turns to show the memory in action
+// Tab 3 — Agent: run a scenario through the MongoDB MCP Server, then wait until
+// the replay reaches the final "Repetir" phase before capturing.
 await tab(2).click();
-await page.waitForTimeout(2000);
-const sessInput = page.locator('input[type="text"]:visible').first();
-await sessInput.fill('Meu nome é Adriano e procuro um presente de até R$200');
-await sessInput.press('Enter');
-await page.waitForTimeout(15000);
-await sessInput.fill('Qual é o meu nome e o meu orçamento?');
-await sessInput.press('Enter');
-await page.waitForTimeout(15000);
-await page.screenshot({ path: OUT + 'tab3-session-memory.png' });
-
-// Tab 4 — Intent + RAG: full pipeline
-await tab(3).click();
 await page.waitForTimeout(1000);
-const pipeInput = page.locator('input[type="text"]:visible').first();
-await pipeInput.fill('compare os fones JBL com cancelamento de ruído');
-await pipeInput.press('Enter');
-await page.waitForTimeout(30000);
-await page.screenshot({ path: OUT + 'tab4-intent-rag.png', fullPage: true });
+await page.locator('.agent-chip', { hasText: 'Trocar' }).click();
+await page.waitForFunction(
+  () => {
+    const active = document.querySelector('.phase-card.active .phase-label');
+    return active && active.textContent === 'Repetir';
+  },
+  { timeout: 90000 },
+);
+await page.waitForTimeout(600);
+await page.screenshot({ path: OUT + 'tab3-agent.png', fullPage: true });
 
 await browser.close();
 console.log('Screenshots saved to docs/img/');

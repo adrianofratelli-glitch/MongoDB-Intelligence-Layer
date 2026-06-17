@@ -6,8 +6,7 @@ import { test, expect } from '@playwright/test';
 const TABS = [
   { index: 0, name: 'tab1-schema-flexivel' },
   { index: 1, name: 'tab2-model-swap' },
-  { index: 2, name: 'tab3-session-memory' },
-  { index: 3, name: 'tab4-intent-rag' },
+  { index: 2, name: 'tab3-agent' },
 ];
 
 test.beforeEach(async ({ page }) => {

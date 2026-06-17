@@ -179,6 +179,74 @@ INTENT_REGISTRY = [
 ]
 
 
+# Support domain for the agent demo (Tab 3). The agent reads these orders through
+# the MongoDB MCP Server, searches produtos_vector for replacement options, and
+# writes status updates back — a real Perceive→Retrieve→Reason→Act→Store loop.
+# Each order maps to one suggestion chip. Re-seeding resets the statuses.
+SUPPORT_ORDERS = [
+    {
+        "order_id": "PED-1001",
+        "customer_name": "Adriano Souza",
+        "product_name": "JBL Tour One M2 — Preto",
+        "sku": "JBL-TOUR-PT-G",
+        "quantity": 1,
+        "unit_price": 598.10,
+        "status": "entregue",
+        "scenario": "pedido_danificado",
+        "issue": None,
+        "timeline": [
+            {"event": "pedido_criado", "at": "2026-06-02T10:12:00Z"},
+            {"event": "entregue", "at": "2026-06-06T15:40:00Z"},
+        ],
+    },
+    {
+        "order_id": "PED-1002",
+        "customer_name": "Marina Lopes",
+        "product_name": "JBL Tour One M2 — Prata",
+        "sku": "JBL-TOUR-PR-G",
+        "quantity": 1,
+        "unit_price": 741.70,
+        "status": "entregue",
+        "scenario": "reembolso",
+        "issue": None,
+        "timeline": [
+            {"event": "pedido_criado", "at": "2026-06-01T09:00:00Z"},
+            {"event": "entregue", "at": "2026-06-04T18:20:00Z"},
+        ],
+    },
+    {
+        "order_id": "PED-1003",
+        "customer_name": "Carlos Menezes",
+        "product_name": "JBL Tour One M2 — Verde",
+        "sku": "JBL-TOUR-VD-G",
+        "quantity": 1,
+        "unit_price": 1114.89,
+        "status": "em_transito",
+        "scenario": "status",
+        "issue": None,
+        "timeline": [
+            {"event": "pedido_criado", "at": "2026-06-12T11:30:00Z"},
+            {"event": "despachado", "at": "2026-06-13T08:05:00Z"},
+        ],
+    },
+    {
+        "order_id": "PED-1004",
+        "customer_name": "Beatriz Antunes",
+        "product_name": "JBL Tour One M2 — Laranja",
+        "sku": "JBL-TOUR-LR-G",
+        "quantity": 1,
+        "unit_price": 790.32,
+        "status": "entregue",
+        "scenario": "troca",
+        "issue": None,
+        "timeline": [
+            {"event": "pedido_criado", "at": "2026-05-28T14:00:00Z"},
+            {"event": "entregue", "at": "2026-06-01T16:10:00Z"},
+        ],
+    },
+]
+
+
 def main():
     uri = os.getenv("MONGODB_URI")
     if not uri:
@@ -194,12 +262,19 @@ def main():
     for intent in INTENT_REGISTRY:
         db["intent_registry"].replace_one({"_id": intent["_id"]}, intent, upsert=True)
 
+    # support_orders lives in POC, next to the product catalog the agent searches
+    poc = client["POC"]
+    for order in SUPPORT_ORDERS:
+        order = {**order, "updated_at": NOW}
+        poc["support_orders"].replace_one({"order_id": order["order_id"]}, order, upsert=True)
+
     print("Seed concluído em ai_brain:")
     for coll in ("prompt_templates", "model_config", "intent_registry", "session_memory"):
         print(f"  {coll}: {db[coll].count_documents({})} documentos")
 
-    poc_count = client["POC"]["produtos_vector"].estimated_document_count()
-    print(f"\nPOC.produtos_vector (somente leitura): ~{poc_count} documentos")
+    print("\nSeed concluído em POC:")
+    print(f"  support_orders: {poc['support_orders'].count_documents({})} documentos")
+    print(f"  produtos_vector (somente leitura): ~{poc['produtos_vector'].estimated_document_count()} documentos")
 
 
 if __name__ == "__main__":
