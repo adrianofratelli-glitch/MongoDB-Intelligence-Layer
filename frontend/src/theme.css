@@ -930,3 +930,134 @@ footer.app-footer p {
   font-weight: 600;
 }
 .agent-chip.memory:hover:not(:disabled) { background: rgba(0, 237, 100, 0.14); }
+
+/* ---------- Feature flags (cache / guardrails / memória) ---------- */
+.feat-flags {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin: 14px 0 4px;
+}
+.feat-card {
+  border: 1px solid var(--border-subtle);
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-secondary);
+}
+.feat-title { font-size: 0.82rem; font-weight: 700; color: var(--text-pri); margin-bottom: 4px; }
+.feat-detail { font-size: 0.7rem; color: var(--text-muted); line-height: 1.45; word-break: break-word; }
+
+.feat-card.cache-hit { border-left-color: var(--accent); background: rgba(0, 237, 100, 0.08); }
+.feat-card.cache-hit .feat-title { color: var(--accent); }
+.feat-card.cache-miss { border-left-color: var(--text-muted); }
+
+.feat-card.guard-ok { border-left-color: var(--teal); }
+.feat-card.guard-warn { border-left-color: var(--orange); background: rgba(249, 115, 22, 0.06); }
+.feat-card.guard-warn .feat-title { color: var(--orange); }
+.feat-card.guard-block { border-left-color: var(--mdb-red); background: rgba(255, 105, 96, 0.08); }
+.feat-card.guard-block .feat-title { color: var(--mdb-red); }
+
+.feat-card.mem { border-left-color: var(--purple); }
+.feat-card.mem .feat-title { color: var(--purple); }
+
+/* ---------- Inspetor das collections do MongoDB ---------- */
+.inspector {
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--bg-primary);
+  margin: 10px 0 4px;
+  overflow: hidden;
+}
+.inspector-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+  flex-wrap: wrap;
+}
+.insp-tab {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.insp-tab.active { border-color: var(--accent); color: var(--accent); background: rgba(0, 237, 100, 0.08); }
+.insp-spacer { flex: 1; }
+.insp-mini {
+  font-size: 0.7rem;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-sec);
+  cursor: pointer;
+}
+.insp-mini.danger { color: var(--mdb-red); border-color: rgba(255, 105, 96, 0.3); }
+.insp-body { padding: 10px 12px; max-height: 260px; overflow-y: auto; }
+.insp-head { font-size: 0.7rem; margin-bottom: 8px; }
+.insp-row {
+  border-left: 2px solid var(--border-accent);
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  background: var(--bg-card);
+  border-radius: 0 6px 6px 0;
+}
+.insp-q { font-size: 0.76rem; color: var(--text-pri); }
+.insp-a { font-size: 0.74rem; color: var(--text-sec); margin-top: 2px; }
+.insp-meta { font-size: 0.66rem; margin-top: 3px; }
+.insp-row.evt-block { border-left-color: var(--mdb-red); }
+.insp-row.evt-mask { border-left-color: var(--orange); }
+.insp-row.evt-allow { border-left-color: var(--teal); }
+
+/* ---------- Demo automática (playlist de scripts) ---------- */
+.demo-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 14px 0 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: linear-gradient(90deg, rgba(0,237,100,0.06), transparent);
+  flex-wrap: wrap;
+}
+.demo-btn {
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 7px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: rgba(0, 237, 100, 0.12);
+  color: var(--accent);
+  cursor: pointer;
+}
+.demo-btn:hover:not(:disabled) { background: rgba(0, 237, 100, 0.2); }
+.demo-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.demo-btn.stop { border-color: var(--mdb-red); background: rgba(255,105,96,0.12); color: var(--mdb-red); }
+.demo-now { font-size: 0.75rem; color: var(--text-sec); }
+.demo-track { display: flex; gap: 5px; margin-left: auto; }
+.demo-dot {
+  width: 16px; height: 6px; border-radius: 3px;
+  background: var(--border-subtle);
+  transition: all 0.25s;
+}
+.demo-dot.badge-cache { outline: 1px solid rgba(0,237,100,0.25); }
+.demo-dot.badge-guardrail { outline: 1px solid rgba(255,105,96,0.25); }
+.demo-dot.badge-memoria { outline: 1px solid rgba(168,85,247,0.25); }
+.demo-dot.badge-agente { outline: 1px solid rgba(6,182,212,0.25); }
+.demo-dot.done { background: var(--text-muted); }
+.demo-dot.now { background: var(--accent); width: 26px; box-shadow: 0 0 10px rgba(0,237,100,0.5); }
+.demo-btn.pause { border-color: var(--orange); background: rgba(249,115,22,0.12); color: var(--orange); }
+.demo-btn.pause:hover:not(:disabled) { background: rgba(249,115,22,0.2); }
+.demo-paused { color: var(--orange); }
+
+/* linhas da memória de curto prazo no inspetor */
+.insp-row.short-user { border-left-color: var(--cyan); }
+.insp-row.short-assistant { border-left-color: var(--accent); }

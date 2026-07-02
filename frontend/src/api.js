@@ -73,7 +73,20 @@ export const api = {
 
   // Tab 3 — Agent (autonomous loop via MongoDB MCP Server)
   agentScenarios: () => request('/api/agent/scenarios'),
+  agentPlaylist: () => request('/api/agent/playlist'),
   agentTools: () => request('/api/agent/tools'),
   agentRun: (body) =>
     request('/api/agent/run', { method: 'POST', body: JSON.stringify(body) }),
+
+  // Intelligence features — cache, memory, guardrails (inspect / reset)
+  cacheInspect: () => request('/api/cache'),
+  cacheClear: () => request('/api/cache', { method: 'DELETE' }),
+  memoryInspect: (userKey) => request(`/api/memory/${encodeURIComponent(userKey)}`),
+  memoryClear: (userKey) =>
+    request(`/api/memory/${encodeURIComponent(userKey)}`, { method: 'DELETE' }),
+  memoryShort: (conversationId) =>
+    request(`/api/memory-short/${encodeURIComponent(conversationId)}`),
+  guardrailsPolicy: () => request('/api/guardrails/policy'),
+  guardrailsRules: () => request('/api/guardrails/rules'),
+  guardrailsEvents: () => request('/api/guardrails/events'),
 };

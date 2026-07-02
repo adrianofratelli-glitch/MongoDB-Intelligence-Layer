@@ -53,11 +53,13 @@ const POSTGRES_MIGRATION = `-- Saiu um modelo novo com estrutura diferente?
 ALTER TABLE prompt_variants
   ADD COLUMN safety_settings JSONB NULL;   -- migration
 
--- + escrever script de migração
--- + revisar em code review
--- + rodar em staging
--- + janela de deploy em produção
--- + torcer para nenhum lock de tabela`;
+-- O ALTER em si é rápido no PG moderno.
+-- O custo real é o PROCESSO em volta dele:
+-- + escrever e revisar a migração
+-- + staging + janela de deploy
+-- + backfill quando há DEFAULT / NOT NULL
+-- + sincronizar o vector DB separado
+-- + invalidar caches da aplicação`;
 
 const CONCERNS = [
   {
@@ -166,7 +168,7 @@ function FlowRace() {
             ))}
           </div>
           <div className={`flow-total alt ${doneSides.alt ? 'show' : ''}`}>
-            dias/semanas — operação de infra
+            dias/semanas — não pela técnica, pelo processo (review, staging, janela)
           </div>
         </div>
       </div>
@@ -231,6 +233,12 @@ export default function FlexibleSchema({ state, setState }) {
           <Code language="sql" darkMode copyable={false}>
             {POSTGRES_MIGRATION}
           </Code>
+          <p className="dim" style={{ marginTop: 12, marginBottom: 0, fontSize: '0.8rem' }}>
+            "E se usarmos JSONB pra tudo?" — aí o schema virou documento <em>sem</em> as
+            ferramentas de documento: sem índice em qualquer caminho aninhado, sem query
+            tipada dentro de arrays, sem Search/Vector sobre o mesmo dado, sem change
+            streams. É um banco de documentos sem o tooling de um.
+          </p>
         </div>
 
         <div className="card">

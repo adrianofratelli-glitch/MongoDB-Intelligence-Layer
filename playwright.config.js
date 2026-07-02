@@ -8,7 +8,8 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   reporter: [['list']],
   use: {
-    baseURL: 'http://localhost:5173',
+    // Override with BASE_URL when the default port is taken by another app.
+    baseURL: process.env.BASE_URL || 'http://localhost:5173',
     colorScheme: 'dark',
     trace: 'off',
   },

@@ -113,6 +113,10 @@ export default function ModelSwap({ state, setState }) {
             </Button>
             <span className="dim">zero restart · zero deploy</span>
           </div>
+          <p className="dim" style={{ marginTop: 0, marginBottom: 12, fontSize: '0.8rem' }}>
+            Este mesmo documento controla o <strong>agente da aba 03</strong>: trocar para
+            Haiku aqui deixa o agente ~40% mais rápido, ao vivo.
+          </p>
           {config ? (
             <JsonViewer doc={config} flashKey={flash} />
           ) : (
@@ -165,6 +169,15 @@ export default function ModelSwap({ state, setState }) {
           </div>
         </div>
       </div>
+
+      {costStats(messages).length === 1 && (
+        <div className="card neutral">
+          <p className="dim" style={{ margin: 0 }}>
+            💡 Agora troque o primary no documento e repita a pergunta — com respostas dos
+            dois modelos, a comparação de custo aparece aqui com os tokens reais.
+          </p>
+        </div>
+      )}
 
       {costStats(messages).length > 0 && (
         <div className="card neutral">

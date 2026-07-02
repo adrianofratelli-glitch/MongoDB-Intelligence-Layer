@@ -25,7 +25,9 @@ const PHASE_CAPTION = {
 };
 
 const short = (obj, n = 160) => {
+  if (obj == null) return '';
   const s = typeof obj === 'string' ? obj : JSON.stringify(obj);
+  if (s == null) return '';
   return s.length > n ? s.slice(0, n) + '…' : s;
 };
 
@@ -34,8 +36,13 @@ const opDetail = (args = {}) => {
   if (args.pipeline) return short(args.pipeline, 200);
   if (args.filter) return 'filter: ' + short(args.filter, 140);
   if (args.update) return 'update: ' + short(args.update, 140);
+  if (args.query) return 'query: ' + short(args.query, 140);
   return '';
 };
+
+// user_key estável: "Nova conversa" zera a memória de curto prazo (agent_sessions),
+// mas a de longo prazo (agent_memory) persiste sob esta mesma chave.
+const USER_KEY = 'cliente-demo';
 
 export default function Agent({ state, setState }) {
   const { run, step, iteration, conversationId, turns = [] } = state;
@@ -46,10 +53,20 @@ export default function Agent({ state, setState }) {
   const [error, setError] = useState(null);
   const [playing, setPlaying] = useState(false);
   const [walk, setWalk] = useState(false);
+  const [showInspector, setShowInspector] = useState(false);
+  const [playlist, setPlaylist] = useState([]);
+  const [demo, setDemo] = useState({ active: false, idx: -1, paused: false });
   const timerRef = useRef(null);
+  const demoTimerRef = useRef(null); // separado do replay: não é limpo pelo cleanup do replay
+  // refs read inside the replay-end effect (avoid stale closures on chaining)
+  const demoRef = useRef(demo);
+  const playlistRef = useRef(playlist);
+  useEffect(() => { demoRef.current = demo; }, [demo]);
+  useEffect(() => { playlistRef.current = playlist; }, [playlist]);
 
   useEffect(() => {
     api.agentScenarios().then((d) => setScenarios(d.scenarios)).catch(() => {});
+    api.agentPlaylist().then((d) => setPlaylist(d.playlist)).catch(() => {});
     api.agentTools().then((d) => setTools(d.tools)).catch(() => {});
   }, []);
 
@@ -70,9 +87,56 @@ export default function Agent({ state, setState }) {
     } else if (playing && step >= lastStep) {
       setPlaying(false);
       setWalk(false);
+      // demo automática: ao terminar o replay de um script, toca o próximo —
+      // exceto se estiver pausada (aí o usuário explora e retoma quando quiser).
+      // Usa demoTimerRef (não timerRef) para o cleanup deste efeito não cancelá-lo.
+      if (demoRef.current.active && !demoRef.current.paused) {
+        clearTimeout(demoTimerRef.current);
+        demoTimerRef.current = setTimeout(advanceDemo, 1500);
+      }
     }
     return () => clearTimeout(timerRef.current);
   }, [playing, step, lastStep, walk]);
+
+  const advanceDemo = () => {
+    const next = demoRef.current.idx + 1;
+    if (demoRef.current.active && next < playlistRef.current.length) {
+      setDemo({ active: true, idx: next, paused: false });
+      runScenario({ message: playlistRef.current[next].message });
+    } else {
+      setDemo({ active: false, idx: -1, paused: false });
+    }
+  };
+
+  const startDemo = () => {
+    if (busy || !playlist.length) return;
+    setDemo({ active: true, idx: 0, paused: false });
+    runScenario({ message: playlist[0].message });
+  };
+
+  // Pausar: congela a demo onde está — o replay para, o avanço é cancelado, e o
+  // usuário pode explorar tudo (trace, ops, painéis) manualmente.
+  const pauseDemo = () => {
+    clearTimeout(demoTimerRef.current);
+    setPlaying(false);
+    setDemo((d) => ({ ...d, paused: true }));
+  };
+
+  // Continuar: retoma de onde parou. Se o replay do script atual não acabou,
+  // segue reproduzindo; se já acabou, avança para o próximo script.
+  const resumeDemo = () => {
+    setDemo((d) => ({ ...d, paused: false }));
+    if (step >= lastStep) advanceDemo();
+    else setPlaying(true);
+  };
+
+  // Encerrar de vez (usado no reset/erro/nova conversa e no botão ⏹).
+  const stopDemo = () => {
+    clearTimeout(timerRef.current);
+    clearTimeout(demoTimerRef.current);
+    setDemo({ active: false, idx: -1, paused: false });
+    setPlaying(false);
+  };
 
   const runScenario = async (payload) => {
     if (busy) return;
@@ -82,7 +146,7 @@ export default function Agent({ state, setState }) {
     setWalk(false);
     const convId = conversationId ?? `conv_${Date.now()}`;
     try {
-      const result = await api.agentRun({ ...payload, conversation_id: convId });
+      const result = await api.agentRun({ ...payload, conversation_id: convId, user_key: USER_KEY });
       setState((s) => ({
         ...s,
         conversationId: result.conversation_id ?? convId,
@@ -98,6 +162,7 @@ export default function Agent({ state, setState }) {
       setPlaying(true); // auto-reproduz o trace
     } catch (e) {
       setError(e.message);
+      setDemo({ active: false, idx: -1, paused: false }); // interrompe a demo se um script falhar
     } finally {
       setBusy(false);
     }
@@ -112,16 +177,20 @@ export default function Agent({ state, setState }) {
   // Reset: limpa só o replay atual; a conversa (memória) permanece
   const reset = () => {
     clearTimeout(timerRef.current);
+    clearTimeout(demoTimerRef.current);
     setPlaying(false);
     setWalk(false);
+    setDemo({ active: false, idx: -1, paused: false });
     setState((s) => ({ ...s, run: null, step: -1 }));
   };
 
   // Nova conversa: sessão nova — zera memória e replay
   const newConversation = () => {
     clearTimeout(timerRef.current);
+    clearTimeout(demoTimerRef.current);
     setPlaying(false);
     setWalk(false);
+    setDemo({ active: false, idx: -1, paused: false });
     setState({ run: null, step: -1, iteration: 0, conversationId: null, turns: [] });
   };
 
@@ -187,6 +256,9 @@ export default function Agent({ state, setState }) {
             >
               📖 Tour guiado
             </Button>
+            <Button size="xsmall" darkMode onClick={() => setShowInspector((v) => !v)}>
+              {showInspector ? '🔎 Ocultar dados' : '🔎 Inspecionar MongoDB'}
+            </Button>
           </div>
         </div>
 
@@ -231,6 +303,43 @@ export default function Agent({ state, setState }) {
             <span className="mono">{PHASE_CAPTION[activePhase]}</span>
           </div>
         )}
+
+        {/* demo automática: 10 scripts variados tocados em sequência */}
+        <div className="demo-bar">
+          {!demo.active ? (
+            <button className="demo-btn" onClick={startDemo} disabled={busy || !playlist.length}>
+              ▶ Demo automática · {playlist.length} scripts
+            </button>
+          ) : demo.paused ? (
+            <>
+              <button className="demo-btn" onClick={resumeDemo} disabled={busy}>▶ Continuar demo</button>
+              <button className="demo-btn stop" onClick={stopDemo}>⏹ Encerrar demo</button>
+            </>
+          ) : (
+            <button className="demo-btn pause" onClick={pauseDemo}>⏸ Pausar demo</button>
+          )}
+          {demo.active && (
+            <span className="demo-now mono">
+              {demo.idx + 1}/{playlist.length} · {playlist[demo.idx]?.label ?? ''}
+              {demo.paused && <span className="demo-paused"> · pausado (explore à vontade)</span>}
+            </span>
+          )}
+          <div className="demo-track">
+            {playlist.map((it, i) => (
+              <span
+                key={it.key}
+                className={`demo-dot badge-${it.badge} ${demo.active && i < demo.idx ? 'done' : ''} ${demo.active && i === demo.idx ? 'now' : ''}`}
+                title={`${i + 1}. ${it.label}`}
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* flags das features de inteligência (cache / guardrails / memória) */}
+        {run && <FeatureFlags run={run} />}
+
+        {/* inspetor das collections do MongoDB */}
+        {showInspector && <MongoInspector userKey={USER_KEY} conversationId={conversationId} run={run} />}
 
         {/* 3 colunas */}
         <div className="agent-grid">
@@ -319,6 +428,237 @@ export default function Agent({ state, setState }) {
           <div className="metric"><div className="metric-val">{metrics.latency}<span className="metric-unit">ms</span></div><div className="metric-label">latência</div></div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---- Flags das features: o que cada camada de MongoDB fez neste turno ----
+function FeatureFlags({ run }) {
+  const cache = run.cache ?? {};
+  const gIn = run.guardrail?.input ?? {};
+  const gOut = run.guardrail?.output ?? {};
+  const mem = run.memory ?? {};
+
+  // Guardrail
+  const blocked = gIn.allowed === false;
+  const masked = gOut?.masked;
+  let guardClass = 'ok';
+  let guardTitle = '🛡️ Guardrails · aprovado';
+  let guardDetail = 'Entrada e saída dentro das políticas (ai_brain.guardrail_policies).';
+  if (blocked) {
+    guardClass = 'block';
+    guardTitle = '🛡️ Guardrails · BLOQUEADO';
+    const v = gIn.violations?.[0];
+    guardDetail = v ? `${v.rule}: ${v.detail}` : 'Pedido barrado pela política.';
+  } else if (masked) {
+    guardClass = 'warn';
+    guardTitle = '🛡️ Guardrails · PII mascarada';
+    guardDetail = 'Dado sensível removido da resposta antes de enviar ao cliente.';
+  } else if (gIn.violations?.length) {
+    guardClass = 'warn';
+    guardTitle = '🛡️ Guardrails · alerta';
+    guardDetail = `${gIn.violations.length} ocorrência(s) registrada(s) em guardrail_events.`;
+  }
+
+  // Cache
+  let cacheClass = 'miss';
+  let cacheTitle = '⚡ Cache semântico · MISS';
+  let cacheDetail = cache.blocked
+    ? 'Não consultado (pedido bloqueado).'
+    : `Melhor score ${cache.score ?? 0} < ${cache.threshold ?? 0.92}. ${cache.stored ? 'Resposta gravada no cache.' : ''}`;
+  if (cache.hit) {
+    cacheClass = 'hit';
+    cacheTitle = '⚡ Cache semântico · HIT';
+    cacheDetail = `Servido do MongoDB sem LLM · score ${cache.score} ≥ ${cache.threshold} · ${cache.latency_ms} ms`;
+  }
+
+  // Memória
+  const stFacts = mem.longterm?.facts?.length ?? 0;
+  const newFacts = mem.new_facts?.length ?? 0;
+  const memTitle = '🧠 Memória · curto + longo prazo';
+  const memDetail = `Curto: agent_sessions (${run.turn_count} msgs). Longo: agent_memory (${stFacts} fatos${newFacts ? `, +${newFacts} novo(s)` : ''}).`;
+
+  return (
+    <div className="feat-flags">
+      <div className={`feat-card cache-${cacheClass}`}>
+        <div className="feat-title">{cacheTitle}</div>
+        <div className="feat-detail mono">{cacheDetail}</div>
+      </div>
+      <div className={`feat-card guard-${guardClass}`}>
+        <div className="feat-title">{guardTitle}</div>
+        <div className="feat-detail mono">{guardDetail}</div>
+      </div>
+      <div className="feat-card mem">
+        <div className="feat-title">{memTitle}</div>
+        <div className="feat-detail mono">{memDetail}</div>
+      </div>
+    </div>
+  );
+}
+
+// ---- Inspetor: lê as collections reais do MongoDB para mostrar ao cliente ----
+const INSP_TABS = [
+  { key: 'cache', label: 'POC.semantic_cache' },
+  { key: 'short', label: 'Memória curta · agent_sessions' },
+  { key: 'memory', label: 'Memória longa · agent_memory' },
+  { key: 'rules', label: 'Guardrails · regras' },
+  { key: 'events', label: 'Guardrails · log' },
+];
+
+function MongoInspector({ userKey, conversationId, run }) {
+  const [tab, setTab] = useState('cache');
+  const [data, setData] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const load = async () => {
+    setLoading(true);
+    setErr(null);
+    try {
+      if (tab === 'cache') setData({ cache: await api.cacheInspect() });
+      else if (tab === 'short')
+        setData({ short: conversationId ? await api.memoryShort(conversationId) : { turns: [] } });
+      else if (tab === 'memory') setData({ memory: await api.memoryInspect(userKey) });
+      else if (tab === 'rules') setData({ rules: await api.guardrailsRules() });
+      else setData({ events: await api.guardrailsEvents() });
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // recarrega ao trocar de aba ou após cada turno do agente
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [tab, run]);
+
+  const clearCache = async () => { await api.cacheClear(); load(); };
+  const clearMemory = async () => { await api.memoryClear(userKey); load(); };
+
+  const policy = data.rules?.policy ?? {};
+
+  return (
+    <div className="inspector">
+      <div className="inspector-tabs">
+        {INSP_TABS.map((t) => (
+          <button
+            key={t.key}
+            className={`insp-tab ${tab === t.key ? 'active' : ''}`}
+            onClick={() => setTab(t.key)}
+          >
+            {t.label}
+          </button>
+        ))}
+        <span className="insp-spacer" />
+        <button className="insp-mini" onClick={load} disabled={loading}>↻ Atualizar</button>
+        {tab === 'cache' && <button className="insp-mini danger" onClick={clearCache}>Limpar cache</button>}
+        {tab === 'memory' && <button className="insp-mini danger" onClick={clearMemory}>Esquecer cliente</button>}
+      </div>
+
+      {err && <div className="dim" style={{ padding: 8 }}>⚠ {err}</div>}
+      {loading && <div className="dim" style={{ padding: 8 }}>carregando…</div>}
+
+      {!loading && tab === 'cache' && (
+        <div className="insp-body">
+          <div className="dim mono insp-head">
+            Índice {data.cache?.index} · HIT quando score ≥ {data.cache?.threshold}
+          </div>
+          {(data.cache?.entries ?? []).length === 0 && <div className="dim">Cache vazio.</div>}
+          {(data.cache?.entries ?? []).map((e) => (
+            <div key={e._id} className="insp-row">
+              <div className="insp-q mono">Q: {e.question}</div>
+              <div className="insp-a">A: {short(e.answer, 160)}</div>
+              <div className="insp-meta mono dim">
+                hits: {e.hits} · {e.model} ·{' '}
+                {e.expires_at ? `expira ${short(e.expires_at, 19)} (TTL)` : 'FAQ — sem expiração'}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!loading && tab === 'short' && (
+        <div className="insp-body">
+          <div className="dim mono insp-head">
+            session_id: {data.short?.session_id ?? conversationId ?? '—'} · turnos desta conversa
+          </div>
+          {(data.short?.turns ?? []).length === 0 && (
+            <div className="dim">Sem turnos ainda nesta conversa. "Nova conversa" zera esta memória.</div>
+          )}
+          {(data.short?.turns ?? []).map((t, i) => (
+            <div key={i} className={`insp-row short-${t.role}`}>
+              <div className="insp-q">{t.role === 'user' ? '👤' : '🤖'} {short(t.content, 200)}</div>
+              <div className="insp-meta mono dim">{t.role} · {t.at}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!loading && tab === 'memory' && (
+        <div className="insp-body">
+          <div className="dim mono insp-head">
+            user_key: {data.memory?.user_key} · fatos consolidados entre sessões (persistem em "Nova conversa")
+          </div>
+          {(data.memory?.facts ?? []).length === 0 && (
+            <div className="dim">Nada memorizado ainda. Diga seu nome ou uma preferência ao agente.</div>
+          )}
+          {(data.memory?.facts ?? []).map((f, i) => (
+            <div key={i} className="insp-row">
+              <div className="insp-q">🔖 {f.fact}</div>
+              <div className="insp-meta mono dim">{f.category} · {f.at}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!loading && tab === 'rules' && (
+        <div className="insp-body">
+          <div className="dim mono insp-head">
+            Os guardrails que aplicamos · política em {data.rules?.policy_collection}, denylist em {data.rules?.denylist_collection}
+          </div>
+          <div className="insp-row">
+            <div className="insp-q">🚫 Denylist semântica (bloqueio por intenção via $vectorSearch)</div>
+            {(data.rules?.denylist ?? []).map((d) => (
+              <div key={d._id} className="insp-meta mono dim">• "{d.phrase}" — {d.category}</div>
+            ))}
+          </div>
+          <div className="insp-row">
+            <div className="insp-q">🔒 PII mascarada na saída</div>
+            {(policy.pii_patterns ?? []).map((p, i) => (
+              <div key={i} className="insp-meta mono dim">• {p.name} → {p.mask}</div>
+            ))}
+          </div>
+          <div className="insp-row">
+            <div className="insp-q">⛔ Termos banidos</div>
+            {(policy.banned_terms ?? []).map((p, i) => (
+              <div key={i} className="insp-meta mono dim">• {p.name}: {p.pattern}</div>
+            ))}
+            {(policy.banned_terms ?? []).length === 0 && <div className="insp-meta mono dim">—</div>}
+          </div>
+          <div className="insp-meta mono dim" style={{ padding: '4px 10px' }}>
+            Limiar da denylist: {policy.denylist_threshold} · bloqueio → "{short(policy.block_message, 80)}"
+          </div>
+        </div>
+      )}
+
+      {!loading && tab === 'events' && (
+        <div className="insp-body">
+          <div className="dim mono insp-head">Log de auditoria dos guardrails (mais recentes primeiro)</div>
+          {(data.events?.events ?? []).length === 0 && <div className="dim">Nenhum evento registrado.</div>}
+          {(data.events?.events ?? []).map((e) => (
+            <div key={e._id} className={`insp-row evt-${e.action}`}>
+              <div className="insp-q mono">
+                [{e.stage}] {e.action.toUpperCase()} — {short(e.text_sample, 90)}
+              </div>
+              {(e.violations ?? []).length > 0 && (
+                <div className="insp-meta mono dim">
+                  {e.violations.map((v) => `${v.rule}(${v.kind})`).join(', ')}
+                </div>
+              )}
+              <div className="insp-meta mono dim">{e.at}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -21,8 +21,19 @@ from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 from pydantic import BaseModel
 
-from agent import SCENARIOS, WRITE_TOOLS, list_agent_tools, mcp_server_params, run_agent
-from db import MAX_TIME_MS, SafeQueryError, ai_brain, get_client, safe_query
+import cache
+import guardrails
+import memory
+from agent import (
+    DEFAULT_USER_KEY,
+    DEMO_PLAYLIST,
+    SCENARIOS,
+    WRITE_TOOLS,
+    list_agent_tools,
+    mcp_server_params,
+    run_agent,
+)
+from db import MAX_TIME_MS, SafeQueryError, ai_brain, get_client, poc, safe_query
 from intents import classify_intent, render_user_prompt, resolve_routing
 from llm import call_with_fallback, get_active_config
 from rag import format_chunks, vector_search
@@ -75,7 +86,11 @@ def clean(doc):
 
 # ---------- Sidebar / health ----------
 
-AI_BRAIN_COLLECTIONS = ["prompt_templates", "model_config", "intent_registry", "session_memory"]
+AI_BRAIN_COLLECTIONS = ["prompt_templates", "model_config", "intent_registry",
+                        "session_memory", "guardrail_policies"]
+# POC collections that power the agent + the new intelligence features
+POC_COLLECTIONS = ["support_orders", "agent_sessions", "agent_memory",
+                   "semantic_cache", "guardrail_denylist", "guardrail_events"]
 
 
 @app.get("/api/health")
@@ -85,12 +100,10 @@ async def health():
     counts = {}
     for coll in AI_BRAIN_COLLECTIONS:
         counts[coll] = await safe_query(db[coll].count_documents({}, maxTimeMS=MAX_TIME_MS))
-    # support_orders lives in POC and powers the agent tab
-    from db import poc
-
-    counts["support_orders"] = await safe_query(
-        poc()["support_orders"].count_documents({}, maxTimeMS=MAX_TIME_MS)
-    )
+    for coll in POC_COLLECTIONS:
+        counts[coll] = await safe_query(
+            poc()[coll].count_documents({}, maxTimeMS=MAX_TIME_MS)
+        )
     cfg = await get_active_config()
     return {
         "ping": "ok",
@@ -349,6 +362,12 @@ async def agent_scenarios():
     }
 
 
+@app.get("/api/agent/playlist")
+async def agent_playlist():
+    """Curated 10-script auto-demo for the ▶ Demo automática button."""
+    return {"playlist": DEMO_PLAYLIST}
+
+
 @app.get("/api/agent/tools")
 async def agent_tools(request: Request):
     """The MongoDB tools the agent has available through the MCP Server."""
@@ -368,6 +387,7 @@ class AgentRunBody(BaseModel):
     scenario: str | None = None
     message: str | None = None
     conversation_id: str | None = None
+    user_key: str | None = None
 
 
 @app.post("/api/agent/run")
@@ -388,9 +408,79 @@ async def agent_run(request: Request, body: AgentRunBody):
                 scenario=body.scenario,
                 message=body.message,
                 conversation_id=conversation_id,
+                user_key=body.user_key or DEFAULT_USER_KEY,
             )
         )
     except SafeQueryError:
         raise
     except Exception as exc:  # noqa: BLE001
         raise SafeQueryError("agente", f"Falha ao executar o agente: {exc}")
+
+
+# ---------- Intelligence features: cache, memory, guardrails (inspect/reset) ----------
+
+@app.get("/api/cache")
+async def cache_inspect():
+    """The semantic cache contents — question, answer, reuse count."""
+    return clean({"entries": await cache.recent(), "threshold": cache.HIT_THRESHOLD,
+                  "collection": f"POC.{cache.CACHE_COLLECTION}",
+                  "index": cache.CACHE_INDEX})
+
+
+@app.delete("/api/cache")
+async def cache_clear():
+    """Demo reset: empty the cache so the next question is a guaranteed MISS."""
+    return {"deleted": await cache.clear()}
+
+
+@app.get("/api/memory/{user_key}")
+async def memory_inspect(user_key: str):
+    """Long-term memory (durable facts) for a user, from POC.agent_memory."""
+    return clean(await memory.load_longterm(user_key))
+
+
+@app.get("/api/memory-short/{conversation_id}")
+async def memory_short_inspect(conversation_id: str):
+    """Short-term memory (the current conversation's turns), from POC.agent_sessions."""
+    doc = await safe_query(
+        poc()["agent_sessions"].find_one({"session_id": conversation_id}, max_time_ms=MAX_TIME_MS)
+    )
+    return clean(doc or {"session_id": conversation_id, "turns": [],
+                         "collection": "POC.agent_sessions"})
+
+
+@app.delete("/api/memory/{user_key}")
+async def memory_clear(user_key: str):
+    """Demo reset: forget everything about this user (long-term memory)."""
+    res = await safe_query(poc()["agent_memory"].delete_many({"user_key": user_key}))
+    return {"deleted": res.deleted_count}
+
+
+@app.get("/api/guardrails/policy")
+async def guardrails_policy():
+    """The live-editable guardrail policy document from ai_brain.guardrail_policies."""
+    return clean(await guardrails.get_policy())
+
+
+@app.get("/api/guardrails/rules")
+async def guardrails_rules():
+    """The active guardrails we enforce: policy (PII, banned terms, threshold) +
+    the semantic denylist phrases. This is 'which guardrails do we have', not the log."""
+    policy = await guardrails.get_policy()
+    cursor = poc()[guardrails.DENYLIST_COLLECTION].find(
+        {}, {"phrase": 1, "category": 1}, max_time_ms=MAX_TIME_MS
+    )
+    denylist = await safe_query(cursor.to_list(length=100))
+    return clean({
+        "policy": policy,
+        "denylist": denylist,
+        "denylist_collection": f"POC.{guardrails.DENYLIST_COLLECTION}",
+        "policy_collection": f"ai_brain.{guardrails.POLICY_COLLECTION}",
+    })
+
+
+@app.get("/api/guardrails/events")
+async def guardrails_events():
+    """Latest guardrail audit records from POC.guardrail_events."""
+    return clean({"events": await guardrails.recent_events(),
+                  "collection": f"POC.{guardrails.EVENTS_COLLECTION}"})
