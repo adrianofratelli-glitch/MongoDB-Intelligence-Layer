@@ -43,41 +43,48 @@ def _normalize(text: str) -> str:
     return " ".join(text.lower().split())
 
 
-async def lookup(question: str) -> dict:
+async def lookup(question: str, area: str = "default") -> dict:
     """Return {hit, score, threshold, answer, question, source_id, latency_ms, mode}.
 
-    `mode` is "vector" when Atlas Vector Search answered, or "exact" when we fell
-    back to a normalized-text match (index not available). A miss still returns
-    the top candidate's score, so the UI can show "how close" it was.
+    Cache isolation per AREA as a NATIVE pre-filter: `area` is a filter field in
+    the vector index, so the ANN search only traverses entries visible to this
+    area (its own + "global" seeded FAQs) — an answer written for Financeiro is
+    never replayed to Suporte, and the top candidate is always a valid one no
+    matter how large the cache grows. `mode` is "vector" (filtered search),
+    "vector-postfilter" (index without the filter field yet — filtered app-side)
+    or "exact" (index missing → normalized-text match). A miss still returns the
+    top candidate's score, so the UI can show "how close" it was.
     """
     coll = poc()[CACHE_COLLECTION]
     t0 = time.perf_counter()
-    pipeline = [
-        {
-            "$vectorSearch": {
-                "index": CACHE_INDEX,
-                "path": CACHE_PATH,
-                "query": question,
-                "numCandidates": 50,
-                "limit": 1,
-            }
-        },
-        {
-            "$project": {
-                "question": 1,
-                "answer": 1,
-                "model": 1,
-                "score": {"$meta": "vectorSearchScore"},
-            }
-        },
-    ]
+
+    def _pipeline(with_filter: bool) -> list[dict]:
+        stage = {
+            "index": CACHE_INDEX,
+            "path": CACHE_PATH,
+            "query": question,
+            "numCandidates": 50,
+            "limit": 1 if with_filter else 5,
+        }
+        if with_filter:
+            stage["filter"] = {"area": {"$in": ["global", area]}}
+        return [
+            {"$vectorSearch": stage},
+            {"$project": {"question": 1, "answer": 1, "model": 1, "area": 1,
+                          "score": {"$meta": "vectorSearchScore"}}},
+        ]
+
     try:
-        cursor = coll.aggregate(pipeline, maxTimeMS=MAX_TIME_MS)
-        docs = await cursor.to_list(length=1)
+        docs = await coll.aggregate(_pipeline(True), maxTimeMS=MAX_TIME_MS).to_list(length=1)
         mode = "vector"
-    except Exception:  # noqa: BLE001 — index not created yet → graceful fallback
-        docs = await _exact_fallback(coll, question)
-        mode = "exact"
+    except Exception:  # noqa: BLE001 — filtro não indexado → pós-filtro app-side
+        try:
+            docs = await coll.aggregate(_pipeline(False), maxTimeMS=MAX_TIME_MS).to_list(length=5)
+            docs = [d for d in docs if d.get("area") in (None, "global", area)]
+            mode = "vector-postfilter"
+        except Exception:  # noqa: BLE001 — index not created yet → graceful fallback
+            docs = await _exact_fallback(coll, question, area)
+            mode = "exact"
 
     latency_ms = int((time.perf_counter() - t0) * 1000)
     if not docs:
@@ -94,6 +101,7 @@ async def lookup(question: str) -> dict:
         "latency_ms": latency_ms,
         "mode": mode,
         "matched_question": top.get("question"),
+        "matched_area": top.get("area"),  # None → entrada global (FAQ)
         "source_id": str(top.get("_id")),
     }
     if hit:
@@ -109,16 +117,20 @@ async def lookup(question: str) -> dict:
     return result
 
 
-async def _exact_fallback(coll, question: str) -> list[dict]:
+async def _exact_fallback(coll, question: str, area: str = "default") -> list[dict]:
     """Normalized exact-match fallback when the vector index isn't available."""
-    doc = await coll.find_one({"question_norm": _normalize(question)}, max_time_ms=MAX_TIME_MS)
+    doc = await coll.find_one(
+        {"question_norm": _normalize(question), "area": {"$in": ["global", area]}},
+        max_time_ms=MAX_TIME_MS,
+    )
     if not doc:
         return []
     doc["score"] = 1.0
     return [doc]
 
 
-async def store(question: str, answer: str, model: str, scope: str = "support") -> str:
+async def store(question: str, answer: str, model: str, scope: str = "support",
+                area: str = "default") -> str:
     """Insert a new Q&A into the cache. Atlas auto-embeds `question` at write time.
 
     Runtime entries get `expires_at` (a real BSON date): the TTL index created by
@@ -132,6 +144,7 @@ async def store(question: str, answer: str, model: str, scope: str = "support") 
         "answer": answer,
         "model": model,
         "scope": scope,
+        "area": area,  # cache isolation: only served back to users of this area
         "hits": 0,
         "created_at": _now(),
         "last_hit_at": None,
@@ -144,7 +157,7 @@ async def store(question: str, answer: str, model: str, scope: str = "support") 
 async def recent(limit: int = 20) -> list[dict]:
     """The most recently used cache entries — for the 'inspect the cache' panel."""
     coll = poc()[CACHE_COLLECTION]
-    cursor = coll.find({}, {"question": 1, "answer": 1, "hits": 1, "model": 1,
+    cursor = coll.find({}, {"question": 1, "answer": 1, "hits": 1, "model": 1, "area": 1,
                             "created_at": 1, "last_hit_at": 1, "expires_at": 1},
                        max_time_ms=MAX_TIME_MS).sort("created_at", -1).limit(limit)
     docs = await safe_query(cursor.to_list(length=limit))

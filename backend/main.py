@@ -24,6 +24,7 @@ from pydantic import BaseModel
 import cache
 import guardrails
 import memory
+import profiles
 from agent import (
     DEFAULT_USER_KEY,
     DEMO_PLAYLIST,
@@ -87,10 +88,11 @@ def clean(doc):
 # ---------- Sidebar / health ----------
 
 AI_BRAIN_COLLECTIONS = ["prompt_templates", "model_config", "intent_registry",
-                        "session_memory", "guardrail_policies"]
+                        "session_memory", "guardrail_policies", "area_profiles"]
 # POC collections that power the agent + the new intelligence features
 POC_COLLECTIONS = ["support_orders", "agent_sessions", "agent_memory",
-                   "semantic_cache", "guardrail_denylist", "guardrail_events"]
+                   "semantic_cache", "guardrail_denylist", "guardrail_events",
+                   "app_users", "agent_traces"]
 
 
 @app.get("/api/health")
@@ -352,6 +354,14 @@ async def pipeline_answer(body: AnswerBody):
 
 # ---------- Tab 3: Agent (autonomous loop via MongoDB MCP Server) ----------
 
+@app.get("/api/users")
+async def list_users():
+    """Registered users (POC.app_users) with their area resolved — powers the
+    identity switcher. In production the user_key comes from real auth (JWT/OIDC),
+    never from the client payload; the switcher stands in for a login."""
+    return clean({"users": await profiles.list_users()})
+
+
 @app.get("/api/agent/scenarios")
 async def agent_scenarios():
     return {
@@ -402,19 +412,38 @@ async def agent_run(request: Request, body: AgentRunBody):
         )
     conversation_id = body.conversation_id or f"conv_{int(datetime.now(timezone.utc).timestamp())}"
     try:
-        return clean(
-            await run_agent(
-                session,
-                scenario=body.scenario,
-                message=body.message,
-                conversation_id=conversation_id,
-                user_key=body.user_key or DEFAULT_USER_KEY,
-            )
+        result = await run_agent(
+            session,
+            scenario=body.scenario,
+            message=body.message,
+            conversation_id=conversation_id,
+            user_key=body.user_key or DEFAULT_USER_KEY,
         )
     except SafeQueryError:
         raise
     except Exception as exc:  # noqa: BLE001
         raise SafeQueryError("agente", f"Falha ao executar o agente: {exc}")
+
+    # Observabilidade: o trace replayável também é um documento (POC.agent_traces).
+    # Best-effort: falha em gravar o trace nunca derruba a resposta ao usuário.
+    try:
+        await poc()["agent_traces"].insert_one({
+            "conversation_id": result.get("conversation_id"),
+            "user_key": body.user_key or DEFAULT_USER_KEY,
+            "area": (result.get("profile") or {}).get("area"),
+            "scenario": result.get("scenario"),
+            "user_message": result.get("user_message"),
+            "answer": result.get("answer"),
+            "model": result.get("model"),
+            "metrics": result.get("metrics"),
+            "cache_hit": (result.get("cache") or {}).get("hit"),
+            "guardrail_action": ((result.get("guardrail") or {}).get("input") or {}).get("action"),
+            "trace": result.get("trace"),
+            "at": datetime.now(timezone.utc),
+        })
+    except Exception:  # noqa: BLE001
+        pass
+    return clean(result)
 
 
 # ---------- Intelligence features: cache, memory, guardrails (inspect/reset) ----------
@@ -435,8 +464,8 @@ async def cache_clear():
 
 @app.get("/api/memory/{user_key}")
 async def memory_inspect(user_key: str):
-    """Long-term memory (durable facts) for a user, from POC.agent_memory."""
-    return clean(await memory.load_longterm(user_key))
+    """Long-term memory for a user: active facts + superseded history (audit)."""
+    return clean(await memory.load_longterm(user_key, include_history=True))
 
 
 @app.get("/api/memory-short/{conversation_id}")
@@ -463,15 +492,18 @@ async def guardrails_policy():
 
 
 @app.get("/api/guardrails/rules")
-async def guardrails_rules():
-    """The active guardrails we enforce: policy (PII, banned terms, threshold) +
-    the semantic denylist phrases. This is 'which guardrails do we have', not the log."""
-    policy = await guardrails.get_policy()
+async def guardrails_rules(area: str = "default"):
+    """The active guardrails for an AREA: its policy (PII, banned terms, threshold)
+    + the denylist phrases that apply to it (global ones + the area's own).
+    This is 'which guardrails do we have', not the log."""
+    policy = await guardrails.get_policy(area)
     cursor = poc()[guardrails.DENYLIST_COLLECTION].find(
-        {}, {"phrase": 1, "category": 1}, max_time_ms=MAX_TIME_MS
+        {"$or": [{"area": {"$exists": False}}, {"area": None}, {"area": area}]},
+        {"phrase": 1, "category": 1, "area": 1}, max_time_ms=MAX_TIME_MS
     )
     denylist = await safe_query(cursor.to_list(length=100))
     return clean({
+        "area": area,
         "policy": policy,
         "denylist": denylist,
         "denylist_collection": f"POC.{guardrails.DENYLIST_COLLECTION}",

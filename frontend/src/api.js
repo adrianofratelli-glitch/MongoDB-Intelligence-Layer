@@ -72,6 +72,7 @@ export const api = {
     }),
 
   // Tab 3 — Agent (autonomous loop via MongoDB MCP Server)
+  users: () => request('/api/users'),
   agentScenarios: () => request('/api/agent/scenarios'),
   agentPlaylist: () => request('/api/agent/playlist'),
   agentTools: () => request('/api/agent/tools'),
@@ -87,6 +88,7 @@ export const api = {
   memoryShort: (conversationId) =>
     request(`/api/memory-short/${encodeURIComponent(conversationId)}`),
   guardrailsPolicy: () => request('/api/guardrails/policy'),
-  guardrailsRules: () => request('/api/guardrails/rules'),
+  guardrailsRules: (area) =>
+    request(`/api/guardrails/rules${area ? `?area=${encodeURIComponent(area)}` : ''}`),
   guardrailsEvents: () => request('/api/guardrails/events'),
 };

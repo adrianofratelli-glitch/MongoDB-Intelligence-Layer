@@ -40,14 +40,22 @@ const opDetail = (args = {}) => {
   return '';
 };
 
-// user_key estável: "Nova conversa" zera a memória de curto prazo (agent_sessions),
-// mas a de longo prazo (agent_memory) persiste sob esta mesma chave.
-const USER_KEY = 'cliente-demo';
+// Identidade: cada usuário (POC.app_users) tem seu user_key e pertence a uma ÁREA.
+// user_key isola a memória (curta e longa); a área decide persona, guardrails e
+// escopo do cache. Fallback quando o seed ainda não criou app_users.
+const FALLBACK_USER = {
+  user_key: 'cliente-demo',
+  name: 'Cliente Demo',
+  area: 'default',
+  area_label: 'Suporte E-commerce',
+};
 
 export default function Agent({ state, setState }) {
   const { run, step, iteration, conversationId, turns = [] } = state;
   const [scenarios, setScenarios] = useState([]);
   const [tools, setTools] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [user, setUser] = useState(FALLBACK_USER);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -56,18 +64,36 @@ export default function Agent({ state, setState }) {
   const [showInspector, setShowInspector] = useState(false);
   const [playlist, setPlaylist] = useState([]);
   const [demo, setDemo] = useState({ active: false, idx: -1, paused: false });
+  // histórico da demo: um snapshot {run, user, conversationId, turns} por script já
+  // executado — permite VOLTAR aos scripts anteriores (pausado) sem nova chamada.
+  const [demoHist, setDemoHist] = useState([]);
   const timerRef = useRef(null);
   const demoTimerRef = useRef(null); // separado do replay: não é limpo pelo cleanup do replay
+  // conversa corrente de cada usuário: trocar de identidade e voltar retoma a
+  // MESMA sessão daquele usuário (a memória curta continua de onde parou).
+  const convMapRef = useRef({});
   // refs read inside the replay-end effect (avoid stale closures on chaining)
   const demoRef = useRef(demo);
   const playlistRef = useRef(playlist);
+  const usersRef = useRef(users);
+  const demoHistRef = useRef(demoHist);
   useEffect(() => { demoRef.current = demo; }, [demo]);
   useEffect(() => { playlistRef.current = playlist; }, [playlist]);
+  useEffect(() => { usersRef.current = users; }, [users]);
+  useEffect(() => { demoHistRef.current = demoHist; }, [demoHist]);
 
   useEffect(() => {
     api.agentScenarios().then((d) => setScenarios(d.scenarios)).catch(() => {});
     api.agentPlaylist().then((d) => setPlaylist(d.playlist)).catch(() => {});
     api.agentTools().then((d) => setTools(d.tools)).catch(() => {});
+    api.users()
+      .then((d) => {
+        if (d.users?.length) {
+          setUsers(d.users);
+          setUser(d.users.find((u) => u.user_key === FALLBACK_USER.user_key) ?? d.users[0]);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const events = run?.trace ?? [];
@@ -98,11 +124,42 @@ export default function Agent({ state, setState }) {
     return () => clearTimeout(timerRef.current);
   }, [playing, step, lastStep, walk]);
 
+  // O usuário que um script da playlist declara (troca de identidade ao vivo).
+  const resolveUser = (item) =>
+    item?.user_key ? usersRef.current.find((u) => u.user_key === item.user_key) ?? null : null;
+
+  // Restaura o snapshot do script `i` do histórico da demo — replay puro, sem
+  // chamada de API. pos: 'start' (passo 0) ou 'end' (último passo do trace).
+  const jumpDemo = (i, pos = 'start') => {
+    const snap = demoHistRef.current[i];
+    if (!snap) return;
+    clearTimeout(timerRef.current);
+    clearTimeout(demoTimerRef.current);
+    setPlaying(false);
+    setWalk(false);
+    setUser(snap.user);
+    setDemo({ active: true, idx: i, paused: true });
+    setState((s) => ({
+      ...s,
+      run: snap.run,
+      conversationId: snap.conversationId,
+      turns: snap.turns,
+      step: pos === 'end' ? Math.max(0, (snap.run.trace?.length ?? 1) - 1) : 0,
+    }));
+  };
+
   const advanceDemo = () => {
+    if (!demoRef.current.active) return;
     const next = demoRef.current.idx + 1;
-    if (demoRef.current.active && next < playlistRef.current.length) {
+    if (next < demoHistRef.current.length) {
+      // já executado (o usuário voltou no histórico): replay do snapshot
+      jumpDemo(next, 'start');
       setDemo({ active: true, idx: next, paused: false });
-      runScenario({ message: playlistRef.current[next].message });
+      setPlaying(true);
+    } else if (next < playlistRef.current.length) {
+      const item = playlistRef.current[next];
+      setDemo({ active: true, idx: next, paused: false });
+      runScenario({ message: item.message }, resolveUser(item));
     } else {
       setDemo({ active: false, idx: -1, paused: false });
     }
@@ -110,8 +167,9 @@ export default function Agent({ state, setState }) {
 
   const startDemo = () => {
     if (busy || !playlist.length) return;
+    setDemoHist([]);
     setDemo({ active: true, idx: 0, paused: false });
-    runScenario({ message: playlist[0].message });
+    runScenario({ message: playlist[0].message }, resolveUser(playlist[0]));
   };
 
   // Pausar: congela a demo onde está — o replay para, o avanço é cancelado, e o
@@ -138,27 +196,45 @@ export default function Agent({ state, setState }) {
     setPlaying(false);
   };
 
-  const runScenario = async (payload) => {
+  // asUser (opcional): a demo automática troca de identidade por script. Trocar de
+  // usuário retoma a conversa dele (convMapRef) — memória curta continua de onde parou.
+  const runScenario = async (payload, asUser = null) => {
     if (busy) return;
+    const target = asUser ?? user;
+    const switched = target.user_key !== user.user_key;
+    if (switched) setUser(target);
     setBusy(true);
     setError(null);
     setPlaying(false);
     setWalk(false);
-    const convId = conversationId ?? `conv_${Date.now()}`;
+    const convId =
+      (switched ? convMapRef.current[target.user_key]
+                : conversationId ?? convMapRef.current[target.user_key]) ?? `conv_${Date.now()}`;
     try {
-      const result = await api.agentRun({ ...payload, conversation_id: convId, user_key: USER_KEY });
+      const result = await api.agentRun({ ...payload, conversation_id: convId, user_key: target.user_key });
+      const finalConvId = result.conversation_id ?? convId;
+      convMapRef.current[target.user_key] = finalConvId;
+      const newTurns = [
+        ...(switched ? [] : turns ?? []),
+        { role: 'user', text: result.user_message },
+        { role: 'agent', text: result.answer },
+      ];
       setState((s) => ({
         ...s,
-        conversationId: result.conversation_id ?? convId,
+        conversationId: finalConvId,
         run: result,
         step: 0,
         iteration: (s.iteration ?? 0) + 1,
-        turns: [
-          ...(s.turns ?? []),
-          { role: 'user', text: result.user_message },
-          { role: 'agent', text: result.answer },
-        ],
+        turns: newTurns,
       }));
+      // demo: guarda o snapshot deste script para o "voltar" navegar sem re-executar
+      if (demoRef.current.active && demoRef.current.idx >= 0) {
+        const idx = demoRef.current.idx;
+        setDemoHist((h) => [
+          ...h.slice(0, idx),
+          { run: result, user: target, conversationId: finalConvId, turns: newTurns },
+        ]);
+      }
       setPlaying(true); // auto-reproduz o trace
     } catch (e) {
       setError(e.message);
@@ -184,21 +260,45 @@ export default function Agent({ state, setState }) {
     setState((s) => ({ ...s, run: null, step: -1 }));
   };
 
-  // Nova conversa: sessão nova — zera memória e replay
+  // Nova conversa: sessão nova — zera memória curta e replay (memória longa fica)
   const newConversation = () => {
     clearTimeout(timerRef.current);
     clearTimeout(demoTimerRef.current);
     setPlaying(false);
     setWalk(false);
     setDemo({ active: false, idx: -1, paused: false });
+    delete convMapRef.current[user.user_key];
     setState({ run: null, step: -1, iteration: 0, conversationId: null, turns: [] });
   };
 
+  // Trocar de usuário = trocar de identidade: memória longa, guardrails e cache
+  // passam a ser os da NOVA área; se esse usuário já conversou, retoma a sessão dele.
+  const switchUser = (u) => {
+    if (busy || u.user_key === user.user_key) return;
+    stopDemo();
+    setUser(u);
+    setState({
+      run: null, step: -1, iteration: 0,
+      conversationId: convMapRef.current[u.user_key] ?? null, turns: [],
+    });
+  };
+
+  // Navegação passo a passo. Com a demo pausada, passar do primeiro/último passo
+  // salta para o script ANTERIOR/SEGUINTE do histórico da demo (replay, sem API).
   const go = (n) => {
+    if (demo.active && demo.paused) {
+      if (n < 0 && demo.idx > 0) return jumpDemo(demo.idx - 1, 'end');
+      if (n > lastStep && demo.idx + 1 < demoHist.length) return jumpDemo(demo.idx + 1, 'start');
+    }
     setPlaying(false);
     setWalk(false);
     setState((s) => ({ ...s, step: Math.max(0, Math.min(lastStep, n)) }));
   };
+
+  // habilita Anterior/Próximo também na fronteira entre scripts da demo pausada
+  const demoNav = demo.active && demo.paused;
+  const canBack = run && (step > 0 || (demoNav && demo.idx > 0));
+  const canForward = run && (step < lastStep || (demoNav && demo.idx + 1 < demoHist.length));
 
   // métricas acumuladas até o passo atual (sensação "ao vivo")
   const calls = visible.filter((e) => e.kind === 'tool_call');
@@ -237,8 +337,8 @@ export default function Agent({ state, setState }) {
               Iteração <span className="accent-num">{iteration ?? 0}</span>
             </span>
             <Button size="xsmall" darkMode onClick={reset} disabled={!run}>Reset</Button>
-            <Button size="xsmall" darkMode onClick={() => go(step - 1)} disabled={!run || step <= 0}>◀ Anterior</Button>
-            <Button size="xsmall" darkMode onClick={() => go(step + 1)} disabled={!run || step >= lastStep}>Próximo ▶</Button>
+            <Button size="xsmall" darkMode onClick={() => go(step - 1)} disabled={!canBack}>◀ Anterior</Button>
+            <Button size="xsmall" darkMode onClick={() => go(step + 1)} disabled={!canForward}>Próximo ▶</Button>
             <Button
               size="xsmall"
               darkMode
@@ -260,6 +360,27 @@ export default function Agent({ state, setState }) {
               {showInspector ? '🔎 Ocultar dados' : '🔎 Inspecionar MongoDB'}
             </Button>
           </div>
+        </div>
+
+        {/* identidade: quem está falando decide memória (user_key) e área (persona,
+            guardrails, cache). Em produção isso viria do login, não de um seletor. */}
+        <div className="agent-users">
+          <span className="dim mono">Usuário:</span>
+          {(users.length ? users : [user]).map((u) => (
+            <button
+              key={u.user_key}
+              className={`user-pill ${u.user_key === user.user_key ? 'active' : ''} ${demo.active ? 'demo-live' : ''}`}
+              onClick={() => switchUser(u)}
+              disabled={busy}
+              title={`user_key: ${u.user_key} · área: ${u.area_label ?? u.area}`}
+            >
+              👤 {u.name}
+              <span className="user-area">{u.area_label ?? u.area}</span>
+            </button>
+          ))}
+          <span className="dim mono" style={{ fontSize: 11 }}>
+            memória por usuário · guardrails e persona por área
+          </span>
         </div>
 
         {/* ferramentas MCP disponíveis + memória da sessão */}
@@ -321,7 +442,10 @@ export default function Agent({ state, setState }) {
           {demo.active && (
             <span className="demo-now mono">
               {demo.idx + 1}/{playlist.length} · {playlist[demo.idx]?.label ?? ''}
-              {demo.paused && <span className="demo-paused"> · pausado (explore à vontade)</span>}
+              {playlist[demo.idx]?.user_key && (
+                <span className="demo-user"> · 👤 {users.find((u) => u.user_key === playlist[demo.idx].user_key)?.name ?? playlist[demo.idx].user_key}</span>
+              )}
+              {demo.paused && <span className="demo-paused"> · pausado — ◀/▶ revisitam os scripts anteriores</span>}
             </span>
           )}
           <div className="demo-track">
@@ -339,7 +463,7 @@ export default function Agent({ state, setState }) {
         {run && <FeatureFlags run={run} />}
 
         {/* inspetor das collections do MongoDB */}
-        {showInspector && <MongoInspector userKey={USER_KEY} conversationId={conversationId} run={run} />}
+        {showInspector && <MongoInspector userKey={user.user_key} area={user.area} conversationId={conversationId} run={run} />}
 
         {/* 3 colunas */}
         <div className="agent-grid">
@@ -438,13 +562,14 @@ function FeatureFlags({ run }) {
   const gIn = run.guardrail?.input ?? {};
   const gOut = run.guardrail?.output ?? {};
   const mem = run.memory ?? {};
+  const prof = run.profile ?? {};
 
   // Guardrail
   const blocked = gIn.allowed === false;
   const masked = gOut?.masked;
   let guardClass = 'ok';
   let guardTitle = '🛡️ Guardrails · aprovado';
-  let guardDetail = 'Entrada e saída dentro das políticas (ai_brain.guardrail_policies).';
+  let guardDetail = `Entrada e saída dentro das políticas da área ${run.profile?.label ?? 'padrão'} (ai_brain.guardrail_policies).`;
   if (blocked) {
     guardClass = 'block';
     guardTitle = '🛡️ Guardrails · BLOQUEADO';
@@ -469,17 +594,24 @@ function FeatureFlags({ run }) {
   if (cache.hit) {
     cacheClass = 'hit';
     cacheTitle = '⚡ Cache semântico · HIT';
-    cacheDetail = `Servido do MongoDB sem LLM · score ${cache.score} ≥ ${cache.threshold} · ${cache.latency_ms} ms`;
+    cacheDetail = `Servido do MongoDB sem LLM · score ${cache.score} ≥ ${cache.threshold} · ${cache.latency_ms} ms · entrada ${cache.matched_area ? `da área ${cache.matched_area}` : 'global (FAQ)'}`;
   }
 
   // Memória
   const stFacts = mem.longterm?.facts?.length ?? 0;
   const newFacts = mem.new_facts?.length ?? 0;
+  const superseded = mem.superseded?.length ?? 0;
   const memTitle = '🧠 Memória · curto + longo prazo';
-  const memDetail = `Curto: agent_sessions (${run.turn_count} msgs). Longo: agent_memory (${stFacts} fatos${newFacts ? `, +${newFacts} novo(s)` : ''}).`;
+  const memDetail = `Curto: agent_sessions (${run.turn_count} msgs). Longo: agent_memory (${stFacts} fatos${newFacts ? `, +${newFacts} novo(s)` : ''}${superseded ? `, ${superseded} substituído(s)${mem.transaction ? ' em transação ACID' : ''}` : ''}).`;
 
   return (
     <div className="feat-flags">
+      <div className="feat-card identity">
+        <div className="feat-title">👥 Identidade & Área · {prof.label ?? 'padrão'}</div>
+        <div className="feat-detail mono">
+          {`${prof.user_name ?? prof.user_key ?? '—'} (user_key: ${prof.user_key ?? '—'}) · persona, guardrails e cache desta área · memória isolada por usuário`}
+        </div>
+      </div>
       <div className={`feat-card cache-${cacheClass}`}>
         <div className="feat-title">{cacheTitle}</div>
         <div className="feat-detail mono">{cacheDetail}</div>
@@ -505,7 +637,7 @@ const INSP_TABS = [
   { key: 'events', label: 'Guardrails · log' },
 ];
 
-function MongoInspector({ userKey, conversationId, run }) {
+function MongoInspector({ userKey, area, conversationId, run }) {
   const [tab, setTab] = useState('cache');
   const [data, setData] = useState({});
   const [loading, setLoading] = useState(false);
@@ -519,7 +651,7 @@ function MongoInspector({ userKey, conversationId, run }) {
       else if (tab === 'short')
         setData({ short: conversationId ? await api.memoryShort(conversationId) : { turns: [] } });
       else if (tab === 'memory') setData({ memory: await api.memoryInspect(userKey) });
-      else if (tab === 'rules') setData({ rules: await api.guardrailsRules() });
+      else if (tab === 'rules') setData({ rules: await api.guardrailsRules(area) });
       else setData({ events: await api.guardrailsEvents() });
     } catch (e) {
       setErr(e.message);
@@ -528,8 +660,8 @@ function MongoInspector({ userKey, conversationId, run }) {
     }
   };
 
-  // recarrega ao trocar de aba ou após cada turno do agente
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [tab, run]);
+  // recarrega ao trocar de aba, de usuário/área ou após cada turno do agente
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [tab, run, userKey, area]);
 
   const clearCache = async () => { await api.cacheClear(); load(); };
   const clearMemory = async () => { await api.memoryClear(userKey); load(); };
@@ -568,7 +700,7 @@ function MongoInspector({ userKey, conversationId, run }) {
               <div className="insp-q mono">Q: {e.question}</div>
               <div className="insp-a">A: {short(e.answer, 160)}</div>
               <div className="insp-meta mono dim">
-                hits: {e.hits} · {e.model} ·{' '}
+                hits: {e.hits} · {e.model} · área: {e.area ?? 'global'} ·{' '}
                 {e.expires_at ? `expira ${short(e.expires_at, 19)} (TTL)` : 'FAQ — sem expiração'}
               </div>
             </div>
@@ -607,18 +739,31 @@ function MongoInspector({ userKey, conversationId, run }) {
               <div className="insp-meta mono dim">{f.category} · {f.at}</div>
             </div>
           ))}
+          {(data.memory?.history ?? []).length > 0 && (
+            <div className="dim mono insp-head" style={{ marginTop: 8 }}>
+              Fatos supersedidos (active: false — trilha de auditoria, nada é apagado)
+            </div>
+          )}
+          {(data.memory?.history ?? []).map((f, i) => (
+            <div key={`h${i}`} className="insp-row fact-old">
+              <div className="insp-q"><s>{f.fact}</s></div>
+              <div className="insp-meta mono dim">{f.category} · substituído · superseded_by: {f.superseded_by ?? '—'}</div>
+            </div>
+          ))}
         </div>
       )}
 
       {!loading && tab === 'rules' && (
         <div className="insp-body">
           <div className="dim mono insp-head">
-            Os guardrails que aplicamos · política em {data.rules?.policy_collection}, denylist em {data.rules?.denylist_collection}
+            Guardrails da área "{data.rules?.area ?? 'default'}" · política em {data.rules?.policy_collection}, denylist em {data.rules?.denylist_collection}
           </div>
           <div className="insp-row">
             <div className="insp-q">🚫 Denylist semântica (bloqueio por intenção via $vectorSearch)</div>
             {(data.rules?.denylist ?? []).map((d) => (
-              <div key={d._id} className="insp-meta mono dim">• "{d.phrase}" — {d.category}</div>
+              <div key={d._id} className="insp-meta mono dim">
+                • "{d.phrase}" — {d.category}{d.area ? ` · só área ${d.area}` : ' · global'}
+              </div>
             ))}
           </div>
           <div className="insp-row">

@@ -877,6 +877,55 @@ footer.app-footer p {
   margin-top: 4px;
 }
 
+/* ---------- agente: identidade (usuário + área) ---------- */
+
+.agent-users {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 0.6rem 0 0.1rem;
+}
+
+.user-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'JetBrains Mono';
+  font-size: 0.72rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.user-pill:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.user-pill.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(0, 237, 100, 0.1);
+  font-weight: 600;
+}
+/* na demo automática, a troca de identidade pulsa para chamar o olho */
+.user-pill.active.demo-live { animation: userGlow 1.6s ease-in-out infinite; }
+@keyframes userGlow {
+  0%, 100% { box-shadow: 0 0 0 rgba(0, 237, 100, 0); }
+  50% { box-shadow: 0 0 12px rgba(0, 237, 100, 0.55); }
+}
+.user-pill:disabled { opacity: 0.5; cursor: default; }
+
+.user-area {
+  font-size: 0.6rem;
+  opacity: 0.8;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.05rem 0.35rem;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+}
+
 /* ---------- agente: ferramentas MCP + memória ---------- */
 
 .agent-meta {
@@ -931,10 +980,10 @@ footer.app-footer p {
 }
 .agent-chip.memory:hover:not(:disabled) { background: rgba(0, 237, 100, 0.14); }
 
-/* ---------- Feature flags (cache / guardrails / memória) ---------- */
+/* ---------- Feature flags (identidade / cache / guardrails / memória) ---------- */
 .feat-flags {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 10px;
   margin: 14px 0 4px;
 }
@@ -960,6 +1009,13 @@ footer.app-footer p {
 
 .feat-card.mem { border-left-color: var(--purple); }
 .feat-card.mem .feat-title { color: var(--purple); }
+
+/* destaque da feature nova: quem fala decide persona/guardrails/cache da área */
+.feat-card.identity {
+  border-left-color: var(--cyan);
+  background: rgba(6, 182, 212, 0.07);
+}
+.feat-card.identity .feat-title { color: var(--cyan); }
 
 /* ---------- Inspetor das collections do MongoDB ---------- */
 .inspector {
@@ -1052,11 +1108,16 @@ footer.app-footer p {
 .demo-dot.badge-guardrail { outline: 1px solid rgba(255,105,96,0.25); }
 .demo-dot.badge-memoria { outline: 1px solid rgba(168,85,247,0.25); }
 .demo-dot.badge-agente { outline: 1px solid rgba(6,182,212,0.25); }
+.demo-dot.badge-area { outline: 2px solid rgba(6,182,212,0.55); } /* destaque: scripts de área/identidade */
+.demo-user { color: var(--cyan); }
 .demo-dot.done { background: var(--text-muted); }
 .demo-dot.now { background: var(--accent); width: 26px; box-shadow: 0 0 10px rgba(0,237,100,0.5); }
 .demo-btn.pause { border-color: var(--orange); background: rgba(249,115,22,0.12); color: var(--orange); }
 .demo-btn.pause:hover:not(:disabled) { background: rgba(249,115,22,0.2); }
 .demo-paused { color: var(--orange); }
+
+/* fatos supersedidos na memória longa (trilha de auditoria) */
+.insp-row.fact-old { opacity: 0.55; }
 
 /* linhas da memória de curto prazo no inspetor */
 .insp-row.short-user { border-left-color: var(--cyan); }

@@ -47,14 +47,50 @@ Two cache-hygiene rules keep the shared cache safe:
 - **Only generic turns are cached.** Turns that touched a specific order (any business tool call) or that involved the customer personally — facts extracted from the message, or long-term memory injected into the prompt (the answer may say "Olá, Dri!") — are **never** written to the cache. Personalized answers must not be replayed to another user.
 - **Freshness is the database's job.** Runtime entries carry an `expires_at` date and a **MongoDB TTL index** deletes them automatically after 24h — no cron, no invalidation code. Seeded FAQs have no `expires_at`, so they never expire.
 
+**Multi-user & multi-area (per-department isolation).** The tab has a user
+switcher backed by `POC.app_users`: each user has a `user_key` (which scopes
+their short- and long-term memory — one user never sees another's facts) and
+belongs to an **area** (department). The area — via `ai_brain.area_profiles`
+and per-area documents in `guardrail_policies` — decides three isolations per
+turn, all of them document reads:
+
+1. **Persona / business rules** → `area_profiles.persona` is appended to the
+   agent's system prompt (e.g. Financeiro: "never negotiate outside the official
+   system, never give investment advice"). Editing an area's rules is an
+   `update_one`, zero deploy.
+2. **Guardrails** → one active policy document per area (fallback `default`).
+   Financeiro has a stricter denylist threshold, extra banned terms and its own
+   block message; denylist entries may carry an `area` field to apply to a single
+   area, otherwise they're global.
+3. **Semantic cache** → runtime entries are tagged with the area that produced
+   them and only serve users of the same area (seeded FAQs are `area: "global"`).
+
+All three vector searches (cache, denylist, memory) use **native pre-filtering**:
+`area` / `user_key` / `active` are `filter`-type fields in the vector indexes, so
+the ANN search only traverses applicable vectors — the top-K results are always
+valid for the requesting tenant, no matter how large the collections grow (this
+is the correct multi-tenant pattern, vs. app-side post-filtering which silently
+loses recall at scale). If an index doesn't have the filter field yet, the code
+degrades to post-filtering, then to exact match.
+
+Try it: send *"Consegue me dar um desconto na fatura por fora?"* as **Marina
+(Financeiro)** → blocked by the area's policy; switch to **Cliente Demo
+(Suporte)** → same message passes and is answered normally. In production the
+`user_key`/area would come from real auth (JWT/OIDC), never from the client
+payload — the switcher stands in for a login.
+
 **Two-tier memory, both in MongoDB:**
 - **Short-term** → `POC.agent_sessions` — the `turns[]` of the current conversation. "Nova conversa" resets it.
-- **Long-term** → `POC.agent_memory` — durable facts about the *user* (name, preferences, history), consolidated across conversations and keyed by `user_key`. Starting a new conversation wipes short-term but **not** long-term, so the agent still greets the returning customer by name. Facts are extracted by a cheap Haiku pass and injected into the system prompt on the next turn.
+- **Long-term** → `POC.agent_memory` — durable facts about the *user*, **one document per fact** (`{user_key, fact, category, active, superseded_by}`), consolidated across conversations. Starting a new conversation wipes short-term but **not** long-term. Facts are extracted by a cheap Haiku pass; three properties make this production-shaped:
+  - **Memory is a query.** When a user has more facts than fit comfortably in the prompt, loading memory becomes a `$vectorSearch` over the facts (autoEmbed index `agent_memory_vs`) **pre-filtered natively** by `user_key` + `active` — only the facts relevant to *this* question are injected, so tokens don't grow with memory size.
+  - **Supersession, not contradiction.** A new fact that contradicts an old one ("prefiro e-mail" after "prefiro WhatsApp") inserts the new doc and flips the old to `active: false` + `superseded_by` **in one ACID transaction**. Nothing is deleted — the inspector shows the struck-through history as an audit trail.
+  - **The agent can't edit its own memory.** The tool loop enforces a per-collection write scope (`update-many` → `POC.support_orders` only); a "creative" agent trying to rewrite `agent_memory` gets denied in-app (visible in the trace) and the platform performs the auditable supersession instead.
 
 **Guardrails whose policy and audit layers are MongoDB** (honest framing — Mongo is the policy store, semantic matcher, and system of record, not the toxicity classifier):
 - **Policy as a document** → `ai_brain.guardrail_policies` — PII regex, banned terms, and thresholds live in one editable doc; tightening a rule is an `update_one`, same live-config story as `model_config`.
 - **Semantic denylist** → `POC.guardrail_denylist` — forbidden example utterances stored with embeddings; an incoming message is `$vectorSearch`-ed against them and blocked if it's *semantically* close to a forbidden intent (leak another customer's data, prompt-injection, guaranteed-return advice) even when phrased differently.
-- **Audit log** → `POC.guardrail_events` — every check (allow / block / mask) is appended and queryable during the PoV. Output PII (CPF, card numbers) is redacted before the answer reaches the user.
+- **Audit log** → `POC.guardrail_events` — every check (allow / block / mask) is appended and queryable during the PoV, **with the text sample already PII-masked** (the governance log is never itself a leak). Output PII (CPF, card numbers) is redacted before the answer reaches the user.
+- **Observability** → `POC.agent_traces` — every agent turn's full replayable trace (phases, tool calls, latencies, cache/guardrail outcomes) is persisted as a document, queryable for debugging and compliance.
 
 > **Note on scores:** voyage-4 autoEmbed on this cluster compresses `vectorSearchScore` into a narrow band (~0.502 unrelated → ~0.506 near-duplicate) — the same regime as the RAG demo's `min_score: 0.5`. The cache (`0.504`) and denylist (`0.505`) thresholds are calibrated to that band; recalibrate if the embedding model or cluster changes.
 
@@ -62,14 +98,27 @@ Two cache-hygiene rules keep the shared cache safe:
 
 | Collection | Database | Role |
 |---|---|---|
-| `semantic_cache` | POC | Q&A + autoEmbed vector (cache HIT/MISS) |
+| `semantic_cache` | POC | Q&A + autoEmbed vector (cache HIT/MISS), tagged per area |
 | `agent_sessions` | POC | short-term (per-conversation) memory |
-| `agent_memory` | POC | long-term (per-user) memory |
-| `guardrail_policies` | ai_brain | live-editable guardrail policy |
-| `guardrail_denylist` | POC | forbidden utterances + autoEmbed vector |
-| `guardrail_events` | POC | guardrail audit log |
+| `agent_memory` | POC | long-term (per-user) memory, keyed by `user_key` |
+| `app_users` | POC | users: `user_key` + which area they belong to |
+| `area_profiles` | ai_brain | per-area persona/business rules (system prompt) |
+| `guardrail_policies` | ai_brain | live-editable guardrail policy, one per area |
+| `guardrail_denylist` | POC | forbidden utterances + autoEmbed vector (global or per-area) |
+| `guardrail_events` | POC | guardrail audit log (user + area, PII-masked) |
+| `agent_traces` | POC | persisted replayable trace of every agent turn |
 
-**Hands-free pitch.** The **▶ Demo automática** button plays a curated 10-script playlist (`/api/agent/playlist`) that alternates the four stories — cache, guardrail, memory, transactional agent — one after another, so the demo never runs a single canned scenario.
+**Hands-free pitch.** The **▶ Demo automática** button plays a curated 12-script
+playlist (`/api/agent/playlist`) that alternates the five stories — cache,
+guardrail, memory, transactional agent, **and area isolation**. Each script
+declares who is speaking: the demo switches the user pill live (Cliente Demo →
+Marina/Financeiro → Ana → Carlos), so the audience watches the same question get
+blocked in one area and answered in another, and a generic answer cached by
+Suporte come back as a MISS for Financeiro. While **paused**, the ◀/▶ buttons
+walk back through the steps and *across* the already-played scripts (pure replay
+from an in-memory history — no API calls, results stay exactly as they happened),
+so you can rewind to the cache HIT or the guardrail block mid-pitch and resume
+from there.
 
 **The agent's model follows the Model Swap tab.** The agent runs on the *active primary* model from `ai_brain.model_config`, so switching Sonnet ↔ Haiku there changes the agent's latency/cost live (≈9.5 s → ≈6 s per transactional turn on Haiku, no redeploy). Cache-HIT and guardrail-blocked turns skip the LLM entirely and stay instant. The agent loop also marks its system prompt and tool schemas with `cache_control`, so Anthropic prompt-caching speeds up every follow-up iteration.
 
