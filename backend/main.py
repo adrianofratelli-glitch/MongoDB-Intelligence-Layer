@@ -5,13 +5,18 @@ Tabs:
   2. Model swap      → /api/model-config, /api/model-config/swap, /api/chat/quick
   3. Agent           → /api/agent/scenarios | run  (autonomous loop via MongoDB MCP Server)
 
-Legacy endpoints kept for reference (folded into the agent on the frontend):
-  /api/sessions...        — session memory
-  /api/pipeline/...       — intent routing + RAG
+A sessão com o MongoDB MCP Server é gerida por um SUPERVISOR em background:
+uma task própria abre a sessão stdio, faz ping periódico e reconecta com
+backoff se o processo morrer — o agente se recupera sozinho, sem reiniciar o
+backend. (Enter/exit dos context managers ficam na MESMA task, exigência dos
+cancel scopes do anyio usados pelo cliente MCP.)
 """
 
+import asyncio
+import logging
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from bson import ObjectId
 from fastapi import FastAPI, Request
@@ -35,28 +40,63 @@ from agent import (
     run_agent,
 )
 from db import MAX_TIME_MS, SafeQueryError, ai_brain, get_client, poc, safe_query
-from intents import classify_intent, render_user_prompt, resolve_routing
 from llm import call_with_fallback, get_active_config
-from rag import format_chunks, vector_search
+
+logger = logging.getLogger("poc.main")
+
+MCP_PING_SECONDS = 30      # intervalo do health-check da sessão MCP
+MCP_RETRY_SECONDS = 5      # backoff entre tentativas de reconexão
+
+
+async def _mcp_supervisor(app: FastAPI, stop: asyncio.Event) -> None:
+    """Dona do ciclo de vida da sessão MCP: abre, monitora (ping), reconecta.
+
+    Tudo acontece nesta task — o stdio_client usa cancel scopes do anyio que
+    não podem ser abertos numa task e fechados em outra.
+    """
+    while not stop.is_set():
+        try:
+            async with AsyncExitStack() as stack:
+                read, write = await stack.enter_async_context(stdio_client(mcp_server_params()))
+                session = await stack.enter_async_context(ClientSession(read, write))
+                await session.initialize()
+                app.state.mcp = session
+                app.state.mcp_error = None
+                logger.info("sessão MongoDB MCP Server estabelecida")
+                while not stop.is_set():
+                    try:
+                        await asyncio.wait_for(stop.wait(), timeout=MCP_PING_SECONDS)
+                    except asyncio.TimeoutError:
+                        await session.send_ping()  # falhou → reconecta lá fora
+        except Exception as exc:  # noqa: BLE001 — sessão caiu → reconectar
+            app.state.mcp = None
+            app.state.mcp_error = str(exc)
+            if not stop.is_set():
+                logger.warning("sessão MCP indisponível (%s) — reconectando em %ss",
+                               str(exc)[:200], MCP_RETRY_SECONDS)
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=MCP_RETRY_SECONDS)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            app.state.mcp = None
+    app.state.mcp = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Open one long-lived MongoDB MCP Server session and reuse it across requests.
-
-    If the MCP Server can't start (npx missing, Atlas unreachable), the app still
-    boots — only the agent endpoint reports the failure, via a friendly Banner.
-    """
+    """Sobe o supervisor da sessão MCP. Se o MCP não subir (npx ausente, Atlas
+    inacessível), o app continua no ar — só o endpoint do agente reporta o erro,
+    via Banner amigável — e o supervisor segue tentando reconectar."""
     app.state.mcp = None
-    async with AsyncExitStack() as stack:
-        try:
-            read, write = await stack.enter_async_context(stdio_client(mcp_server_params()))
-            session = await stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
-            app.state.mcp = session
-        except Exception as exc:  # noqa: BLE001 — keep the app usable without the agent
-            app.state.mcp_error = str(exc)
+    app.state.mcp_error = "sessão MCP ainda inicializando"
+    stop = asyncio.Event()
+    task = asyncio.create_task(_mcp_supervisor(app, stop))
+    try:
         yield
+    finally:
+        stop.set()
+        await task
 
 
 app = FastAPI(title="MongoDB Intelligence Layer", lifespan=lifespan)
@@ -75,21 +115,25 @@ async def safe_query_handler(_: Request, exc: SafeQueryError):
 
 
 def clean(doc):
-    """ObjectId/datetime → string for JSON."""
+    """ObjectId/datetime → string for JSON (datas sempre como ISO-8601 UTC "Z")."""
     if isinstance(doc, list):
         return [clean(d) for d in doc]
     if isinstance(doc, dict):
         return {k: clean(v) for k, v in doc.items()}
-    if isinstance(doc, (ObjectId, datetime)):
+    if isinstance(doc, datetime):
+        if doc.tzinfo is not None:
+            doc = doc.astimezone(timezone.utc)
+        return doc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if isinstance(doc, ObjectId):
         return str(doc)
     return doc
 
 
 # ---------- Sidebar / health ----------
 
-AI_BRAIN_COLLECTIONS = ["prompt_templates", "model_config", "intent_registry",
-                        "session_memory", "guardrail_policies", "area_profiles"]
-# POC collections that power the agent + the new intelligence features
+AI_BRAIN_COLLECTIONS = ["prompt_templates", "model_config", "cache_config",
+                        "guardrail_policies", "area_profiles"]
+# POC collections that power the agent + the intelligence features
 POC_COLLECTIONS = ["support_orders", "agent_sessions", "agent_memory",
                    "semantic_cache", "guardrail_denylist", "guardrail_events",
                    "app_users", "agent_traces"]
@@ -201,155 +245,25 @@ class QuickChatBody(BaseModel):
 
 @app.post("/api/chat/quick")
 async def quick_chat(body: QuickChatBody):
+    """Chat do Model Swap. Guardrail de entrada TAMBÉM aqui: proteção é
+    transversal — nenhum endpoint que chama o LLM fica fora da política."""
+    guard = await guardrails.check_input(
+        body.question, "model-swap-demo", "quick-chat", "default"
+    )
+    if not guard["allowed"]:
+        return {
+            "text": guard["block_message"],
+            "model": "guardrail",
+            "route": "blocked",
+            "latency_ms": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
     result = await call_with_fallback(
         system="Você é um assistente de e-commerce. Responda em português, em poucas frases.",
-        messages=[{"role": "user", "content": body.question}],
+        messages=[{"role": "user", "content": guard.get("masked_text") or body.question}],
     )
     return result
-
-
-# ---------- Tab 3: Session Memory ----------
-
-@app.post("/api/sessions")
-async def create_session():
-    doc = {
-        "turns": [],
-        "metadata": {
-            "channel": "poc-demo",
-            "created_at": datetime.now(timezone.utc),
-        },
-    }
-    res = await safe_query(ai_brain()["session_memory"].insert_one(doc))
-    return {"session_id": str(res.inserted_id)}
-
-
-@app.get("/api/sessions/{session_id}")
-async def get_session(session_id: str):
-    doc = await safe_query(
-        ai_brain()["session_memory"].find_one({"_id": ObjectId(session_id)}, max_time_ms=MAX_TIME_MS)
-    )
-    if not doc:
-        raise SafeQueryError("config", "Sessão não encontrada.")
-    return clean(doc)
-
-
-class SessionChatBody(BaseModel):
-    question: str
-
-
-@app.post("/api/sessions/{session_id}/chat")
-async def session_chat(session_id: str, body: SessionChatBody):
-    """Each turn is a $push onto the turns array — native conversational memory, no JOIN."""
-    coll = ai_brain()["session_memory"]
-    oid = ObjectId(session_id)
-    doc = await safe_query(coll.find_one({"_id": oid}, max_time_ms=MAX_TIME_MS))
-    if doc is None:
-        raise SafeQueryError("config", "Sessão não encontrada. Crie uma nova sessão.")
-
-    turns = doc.get("turns", [])
-    next_turn = len(turns) + 1
-
-    # history (last 10 turns) comes straight from the document's array
-    history = [
-        {"role": t["role"], "content": t["content"]}
-        for t in turns[-10:]
-        if t["role"] in ("user", "assistant")
-    ]
-    history.append({"role": "user", "content": body.question})
-
-    result = await call_with_fallback(
-        system="Você é um assistente de e-commerce com memória da conversa. Responda em português.",
-        messages=history,
-    )
-
-    now = datetime.now(timezone.utc)
-    await safe_query(
-        coll.update_one(
-            {"_id": oid},
-            {
-                "$push": {
-                    "turns": {
-                        "$each": [
-                            {
-                                "turn": next_turn,
-                                "role": "user",
-                                "content": body.question,
-                                "timestamp": now,
-                                "model_used": None,
-                                "tokens_used": result["input_tokens"],
-                            },
-                            {
-                                "turn": next_turn + 1,
-                                "role": "assistant",
-                                "content": result["text"],
-                                "timestamp": datetime.now(timezone.utc),
-                                "model_used": result["model"],
-                                "tokens_used": result["output_tokens"],
-                            },
-                        ]
-                    }
-                },
-                "$set": {"metadata.last_activity": now},
-            },
-        )
-    )
-    return {"answer": result, "session": await get_session(session_id)}
-
-
-# ---------- Tab 4: Intent Routing + RAG ----------
-
-class PipelineBody(BaseModel):
-    question: str
-
-
-@app.post("/api/pipeline/classify")
-async def pipeline_classify(body: PipelineBody):
-    return clean(await classify_intent(body.question))
-
-
-class RouteBody(BaseModel):
-    intent: str
-
-
-@app.post("/api/pipeline/route")
-async def pipeline_route(body: RouteBody):
-    cfg = await get_active_config()
-    routing = await resolve_routing(body.intent, cfg["primary"]["model"])
-    return clean({**routing, "active_model": cfg["primary"]["model"]})
-
-
-class SearchBody(BaseModel):
-    question: str
-    intent: str
-
-
-@app.post("/api/pipeline/search")
-async def pipeline_search(body: SearchBody):
-    cfg = await get_active_config()
-    routing = await resolve_routing(body.intent, cfg["primary"]["model"])
-    chunks, funnel = await vector_search(body.question, routing["rag_config"])
-    # token estimate for the injected context (~4 chars/token)
-    funnel["context_tokens_est"] = len(format_chunks(chunks)) // 4
-    return clean({"chunks": chunks, "rag_config": routing["rag_config"], "funnel": funnel})
-
-
-class AnswerBody(BaseModel):
-    question: str
-    intent: str
-
-
-@app.post("/api/pipeline/answer")
-async def pipeline_answer(body: AnswerBody):
-    cfg = await get_active_config()
-    routing = await resolve_routing(body.intent, cfg["primary"]["model"])
-    chunks, funnel = await vector_search(body.question, routing["rag_config"])
-    variant = routing["variant"] or {}
-    user_prompt = render_user_prompt(variant, body.question, format_chunks(chunks))
-    result = await call_with_fallback(
-        system=variant.get("system", "Responda em português."),
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-    return clean({"answer": result, "chunks_used": len(chunks), "funnel": funnel})
 
 
 # ---------- Tab 3: Agent (autonomous loop via MongoDB MCP Server) ----------
@@ -374,7 +288,7 @@ async def agent_scenarios():
 
 @app.get("/api/agent/playlist")
 async def agent_playlist():
-    """Curated 10-script auto-demo for the ▶ Demo automática button."""
+    """Curated auto-demo scripts for the ▶ Demo automática button."""
     return {"playlist": DEMO_PLAYLIST}
 
 
@@ -404,13 +318,16 @@ class AgentRunBody(BaseModel):
 async def agent_run(request: Request, body: AgentRunBody):
     session = getattr(request.app.state, "mcp", None)
     if session is None:
-        detail = getattr(request.app.state, "mcp_error", "")
+        detail = getattr(request.app.state, "mcp_error", "") or ""
         raise SafeQueryError(
             "mcp",
-            "O MongoDB MCP Server não está disponível. "
-            "Confira se o Node/npx está instalado e o cluster acessível. " + detail,
+            "O MongoDB MCP Server não está disponível (o supervisor está tentando "
+            "reconectar). Confira se o Node/npx está instalado e o cluster acessível. "
+            + detail,
         )
-    conversation_id = body.conversation_id or f"conv_{int(datetime.now(timezone.utc).timestamp())}"
+    # uuid4: id de conversa não-adivinhável (timestamp em segundos colide entre
+    # usuários e é enumerável)
+    conversation_id = body.conversation_id or f"conv_{uuid4().hex[:16]}"
     try:
         result = await run_agent(
             session,
@@ -425,6 +342,7 @@ async def agent_run(request: Request, body: AgentRunBody):
         raise SafeQueryError("agente", f"Falha ao executar o agente: {exc}")
 
     # Observabilidade: o trace replayável também é um documento (POC.agent_traces).
+    # PII: user_message/answer/trace chegam aqui já mascarados pelos guardrails.
     # Best-effort: falha em gravar o trace nunca derruba a resposta ao usuário.
     try:
         await poc()["agent_traces"].insert_one({
@@ -442,7 +360,7 @@ async def agent_run(request: Request, body: AgentRunBody):
             "at": datetime.now(timezone.utc),
         })
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("falha ao gravar agent_trace (best-effort)")
     return clean(result)
 
 
@@ -451,7 +369,8 @@ async def agent_run(request: Request, body: AgentRunBody):
 @app.get("/api/cache")
 async def cache_inspect():
     """The semantic cache contents — question, answer, reuse count."""
-    return clean({"entries": await cache.recent(), "threshold": cache.HIT_THRESHOLD,
+    cfg = await cache.get_config()
+    return clean({"entries": await cache.recent(), "threshold": cfg["hit_threshold"],
                   "collection": f"POC.{cache.CACHE_COLLECTION}",
                   "index": cache.CACHE_INDEX})
 

@@ -8,9 +8,17 @@ equality): "como peço reembolso?" hits the cache entry for "quero um estorno".
 How it works, all in MongoDB:
   - lookup(): a real $vectorSearch on POC.semantic_cache. Atlas embeds the
     incoming question on the fly (autoEmbed) and returns the nearest prior Q&A
-    with a cosine score. score >= HIT_THRESHOLD → cache HIT.
+    with a similarity score. score >= hit_threshold → cache HIT.
   - store(): inserts the new Q&A; Atlas embeds `question` at write time.
   - Every HIT does an $inc on `hits` so the client can see reuse building up.
+
+O THRESHOLD é config viva (ai_brain.cache_config), não constante: o autoEmbed
+voyage-4 expõe o vectorSearchScore numa banda comprimida (medida neste cluster:
+~0.5014 não-relacionado → ~0.5056 texto idêntico — sim, idêntico NÃO dá 1.0).
+O ranking é confiável; a escala absoluta não é. Por isso o threshold é
+calibrado por medição (backend/calibrate_thresholds.py) e vive num documento
+editável — recalibrar é um update_one, não um deploy. Mesma história do
+model_config.
 
 If the vector index is missing (not yet created in Atlas), lookup() degrades
 gracefully to an exact normalized-text match, so the demo never crashes.
@@ -19,28 +27,40 @@ gracefully to an exact normalized-text match, so the demo never crashes.
 import time
 from datetime import datetime, timedelta, timezone
 
-from db import MAX_TIME_MS, poc, safe_query
+from db import MAX_TIME_MS, aggregate_list, ai_brain, poc, safe_query
 
 CACHE_COLLECTION = "semantic_cache"
 CACHE_INDEX = "semantic_cache_vs"      # Atlas Vector Search index (autoEmbed on `question`)
 CACHE_PATH = "question"                # source text field for autoEmbed
-# Freshness: runtime entries carry an `expires_at` date and a MongoDB TTL index
-# deletes them automatically — no cron job, the database expires its own cache.
-# Seeded FAQs have no `expires_at`, so the TTL monitor never touches them.
-CACHE_TTL_SECONDS = 24 * 3600
-# Score above which we serve from cache. NOTE: voyage-4 autoEmbed on this cluster
-# compresses vectorSearchScore into a narrow band (~0.502 unrelated → ~0.506
-# near-duplicate) — same regime as the RAG demo's min_score=0.5. This threshold
-# is calibrated to that band; recalibrate if the embedding model/cluster changes.
-HIT_THRESHOLD = 0.504
+CONFIG_COLLECTION = "cache_config"     # in ai_brain — live-editable threshold/TTL
+
+# Fallback defaults quando ai_brain.cache_config não existe (seed não rodou).
+# Valores medidos em 2026-07 com calibrate_thresholds.py — ver docstring acima.
+DEFAULT_HIT_THRESHOLD = 0.504
+DEFAULT_TTL_SECONDS = 24 * 3600
 
 
-def _now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _normalize(text: str) -> str:
     return " ".join(text.lower().split())
+
+
+async def get_config() -> dict:
+    """Live config do cache (threshold calibrado + TTL) — lido a cada lookup."""
+    doc = None
+    try:
+        doc = await ai_brain()[CONFIG_COLLECTION].find_one(
+            {"active": True}, max_time_ms=MAX_TIME_MS
+        )
+    except Exception:  # noqa: BLE001 — config ausente nunca derruba o cache
+        pass
+    return {
+        "hit_threshold": float((doc or {}).get("hit_threshold", DEFAULT_HIT_THRESHOLD)),
+        "ttl_seconds": int((doc or {}).get("ttl_seconds", DEFAULT_TTL_SECONDS)),
+    }
 
 
 async def lookup(question: str, area: str = "default") -> dict:
@@ -56,6 +76,8 @@ async def lookup(question: str, area: str = "default") -> dict:
     top candidate's score, so the UI can show "how close" it was.
     """
     coll = poc()[CACHE_COLLECTION]
+    cfg = await get_config()
+    threshold = cfg["hit_threshold"]
     t0 = time.perf_counter()
 
     def _pipeline(with_filter: bool) -> list[dict]:
@@ -75,11 +97,11 @@ async def lookup(question: str, area: str = "default") -> dict:
         ]
 
     try:
-        docs = await coll.aggregate(_pipeline(True), maxTimeMS=MAX_TIME_MS).to_list(length=1)
+        docs = await aggregate_list(coll, _pipeline(True), length=1, maxTimeMS=MAX_TIME_MS)
         mode = "vector"
     except Exception:  # noqa: BLE001 — filtro não indexado → pós-filtro app-side
         try:
-            docs = await coll.aggregate(_pipeline(False), maxTimeMS=MAX_TIME_MS).to_list(length=5)
+            docs = await aggregate_list(coll, _pipeline(False), length=5, maxTimeMS=MAX_TIME_MS)
             docs = [d for d in docs if d.get("area") in (None, "global", area)]
             mode = "vector-postfilter"
         except Exception:  # noqa: BLE001 — index not created yet → graceful fallback
@@ -88,16 +110,16 @@ async def lookup(question: str, area: str = "default") -> dict:
 
     latency_ms = int((time.perf_counter() - t0) * 1000)
     if not docs:
-        return {"hit": False, "score": 0.0, "threshold": HIT_THRESHOLD,
+        return {"hit": False, "score": 0.0, "threshold": threshold,
                 "latency_ms": latency_ms, "mode": mode}
 
     top = docs[0]
     score = float(top.get("score", 0.0))
-    hit = score >= HIT_THRESHOLD
+    hit = score >= threshold
     result = {
         "hit": hit,
         "score": round(score, 4),
-        "threshold": HIT_THRESHOLD,
+        "threshold": threshold,
         "latency_ms": latency_ms,
         "mode": mode,
         "matched_question": top.get("question"),
@@ -111,7 +133,7 @@ async def lookup(question: str, area: str = "default") -> dict:
         await safe_query(
             coll.update_one(
                 {"_id": top["_id"]},
-                {"$inc": {"hits": 1}, "$set": {"last_hit_at": _now()}},
+                {"$inc": {"hits": 1}, "$set": {"last_hit_at": _utcnow()}},
             )
         )
     return result
@@ -134,10 +156,11 @@ async def store(question: str, answer: str, model: str, scope: str = "support",
     """Insert a new Q&A into the cache. Atlas auto-embeds `question` at write time.
 
     Runtime entries get `expires_at` (a real BSON date): the TTL index created by
-    seed.py deletes them CACHE_TTL_SECONDS after insertion — freshness handled by
+    seed.py deletes them ttl_seconds after insertion — freshness handled by
     the database itself, not by application code.
     """
     coll = poc()[CACHE_COLLECTION]
+    cfg = await get_config()
     doc = {
         "question": question,
         "question_norm": _normalize(question),  # powers the exact fallback
@@ -146,9 +169,9 @@ async def store(question: str, answer: str, model: str, scope: str = "support",
         "scope": scope,
         "area": area,  # cache isolation: only served back to users of this area
         "hits": 0,
-        "created_at": _now(),
+        "created_at": _utcnow(),
         "last_hit_at": None,
-        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=CACHE_TTL_SECONDS),
+        "expires_at": _utcnow() + timedelta(seconds=cfg["ttl_seconds"]),
     }
     res = await safe_query(coll.insert_one(doc))
     return str(res.inserted_id)

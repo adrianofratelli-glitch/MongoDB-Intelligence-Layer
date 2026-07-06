@@ -1,5 +1,9 @@
 """Atlas connection + safe_query helper.
 
+Driver: PyMongo Async (AsyncMongoClient) — o driver assíncrono oficial que
+substituiu o Motor (deprecado). Diferença relevante de API: `aggregate()` é uma
+corrotina (retorna o cursor após await) — por isso o helper aggregate_list.
+
 Every read goes through maxTimeMS=10s. Operational errors become a SafeQueryError
 with a user-friendly message — the frontend renders it in a Banner, never a stack trace.
 """
@@ -8,7 +12,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import AsyncMongoClient
 from pymongo.errors import (
     ConnectionFailure,
     ExecutionTimeout,
@@ -22,10 +26,10 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 MAX_TIME_MS = 10_000
 
-_client: AsyncIOMotorClient | None = None
+_client: AsyncMongoClient | None = None
 
 
-def get_client() -> AsyncIOMotorClient:
+def get_client() -> AsyncMongoClient:
     global _client
     if _client is None:
         uri = os.getenv("MONGODB_URI")
@@ -34,7 +38,7 @@ def get_client() -> AsyncIOMotorClient:
                 "config",
                 "MONGODB_URI não definida. Copie .env.example para .env e preencha a URI do cluster.",
             )
-        _client = AsyncIOMotorClient(
+        _client = AsyncMongoClient(
             uri,
             serverSelectionTimeoutMS=MAX_TIME_MS,
             connectTimeoutMS=MAX_TIME_MS,
@@ -51,6 +55,12 @@ def poc():
     return get_client()["POC"]
 
 
+async def aggregate_list(coll, pipeline, *, length: int, **kwargs) -> list[dict]:
+    """PyMongo Async: aggregate() é corrotina → await duas vezes (cursor, depois lista)."""
+    cursor = await coll.aggregate(pipeline, **kwargs)
+    return await cursor.to_list(length=length)
+
+
 class SafeQueryError(Exception):
     """Operational error carrying a UI-ready message."""
 
@@ -61,7 +71,7 @@ class SafeQueryError(Exception):
 
 
 async def safe_query(awaitable):
-    """Awaits a Motor operation, mapping failures to user-friendly messages.
+    """Awaits a PyMongo Async operation, mapping failures to user-friendly messages.
 
     maxTimeMS is passed on each call (find/aggregate); here we handle what
     slips through: timeouts, missing search index, mongot restarting, network.

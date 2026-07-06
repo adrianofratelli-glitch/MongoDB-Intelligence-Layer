@@ -5,7 +5,7 @@ applications. Prompt schemas, model configuration, and an autonomous agent's
 memory all live as documents — and evolve with a single `update_one`, not a
 migration or a redeploy.
 
-**Stack:** React + Vite + LeafyGreen UI · FastAPI + Motor (async) · MongoDB Atlas (Vector Search with autoEmbed voyage-4) · **MongoDB MCP Server** · Anthropic API (Sonnet 4.5 / Haiku 4.5)
+**Stack:** React + Vite + LeafyGreen UI · FastAPI + **PyMongo Async** (the official async driver that replaced the deprecated Motor) · MongoDB Atlas (Vector Search with autoEmbed voyage-4) · **MongoDB MCP Server** · Anthropic API (Sonnet 4.5 / Haiku 4.5)
 
 > The demo UI is in Portuguese, since it is used in client-facing sessions with Brazilian teams.
 
@@ -24,7 +24,7 @@ The production model is a document (`model_config`), read on every request. Swit
 ### Tab 3 — The agent (Powered by MongoDB MCP Server)
 An autonomous support agent runs a **real tool-use loop**: the model decides which MongoDB tools to call — `find` an order, `$vectorSearch` the catalog for replacements, `update` a status — and they are executed against Atlas through the **MongoDB MCP Server** (the available tools are shown in a panel, lit up as they are used). The run is recorded and replayed step by step across the `Perceive → Retrieve → Reason → Act → Store → Loop` phases, with real read/write/latency counters.
 
-**Session memory lives in a document.** Every turn is `$push`-ed to `POC.agent_sessions`. Because each run is a stateless request, the agent can only recall earlier turns by querying that document — so asking it to *"consolidate the questions I've asked"* triggers a real `find` on `agent_sessions`, making the persistence visible as a MongoDB operation. This single tab tells the whole "MongoDB as the agent's data layer" story (retrieval, memory, and writes), so it absorbs what used to be separate memory and RAG tabs.
+**Session memory lives in a document — hybrid pattern.** Every turn is `$push`-ed to `POC.agent_sessions` (capped with `$slice`, so the array never grows unbounded). Each run then *hydrates the last few turns* from that document into the model's context — implicit references ("e o outro pedido?") just work — while the **full** history remains a query: asking the agent to *"consolidate all the questions I've asked"* still triggers a real `find` on `agent_sessions`, making the persistence visible as a MongoDB operation. Recent window in context + query for everything older is the production-standard shape for short-term agent memory. This single tab tells the whole "MongoDB as the agent's data layer" story (retrieval, memory, and writes), so it absorbs what used to be separate memory and RAG tabs.
 
 ![The agent](docs/img/tab3-agent.png)
 
@@ -33,15 +33,19 @@ An autonomous support agent runs a **real tool-use loop**: the model decides whi
 Every agent turn now runs through a pipeline where **each step is a real MongoDB operation**, surfaced live in the trace and in three "feature flag" cards plus a MongoDB inspector:
 
 ```
-mensagem → [Guardrail entrada] → [Cache semântico?] ──HIT──→ resposta (sem LLM) ⚡
+mensagem → [Guardrail entrada + máscara de PII] → [Cache semântico?] ──HIT──→ resposta (sem LLM) ⚡
                                         │ MISS
                                         ▼
-                          [carrega memória LP] → loop do agente (MCP)
+                (em paralelo: extração de fatos p/ memória LP — Haiku)
+                                        ▼
+        [memória LP relevante + últimos turnos CP] → loop do agente (MCP)
                                         ▼
                           [Guardrail saída] → salva CP + LP → grava no cache
 ```
 
-**Semantic cache** — before calling the model, the question is `$vectorSearch`-ed against `POC.semantic_cache` (autoEmbed voyage-4). If a semantically-equivalent question was already answered (score ≥ threshold), the stored answer is served **straight from MongoDB with no LLM call**, and the UI raises a green **CACHE HIT** flag with the similarity score and latency. A `$inc` on `hits` makes reuse visible.
+**Semantic cache** — before calling the model, the question is `$vectorSearch`-ed against `POC.semantic_cache` (autoEmbed voyage-4). If a semantically-equivalent question was already answered (score ≥ threshold), the stored answer is served **straight from MongoDB with no LLM call**, and the UI raises a green **CACHE HIT** flag with the similarity score and latency. A `$inc` on `hits` makes reuse visible. The HIT threshold is itself **live config** (`ai_brain.cache_config`), calibrated by measurement (`backend/calibrate_thresholds.py`) — recalibrating is an `update_one`, not a deploy.
+
+![Semantic cache HIT — answer served from MongoDB with no LLM call](docs/img/tab3-cache-hit.png)
 
 Two cache-hygiene rules keep the shared cache safe:
 - **Only generic turns are cached.** Turns that touched a specific order (any business tool call) or that involved the customer personally — facts extracted from the message, or long-term memory injected into the prompt (the answer may say "Olá, Dri!") — are **never** written to the cache. Personalized answers must not be replayed to another user.
@@ -80,24 +84,27 @@ Try it: send *"Consegue me dar um desconto na fatura por fora?"* as **Marina
 payload — the switcher stands in for a login.
 
 **Two-tier memory, both in MongoDB:**
-- **Short-term** → `POC.agent_sessions` — the `turns[]` of the current conversation. "Nova conversa" resets it.
-- **Long-term** → `POC.agent_memory` — durable facts about the *user*, **one document per fact** (`{user_key, fact, category, active, superseded_by}`), consolidated across conversations. Starting a new conversation wipes short-term but **not** long-term. Facts are extracted by a cheap Haiku pass; three properties make this production-shaped:
+- **Short-term** → `POC.agent_sessions` — the `turns[]` of the current conversation (`$slice`-capped; recent turns hydrated into context, full history queried on demand). "Nova conversa" resets it.
+- **Long-term** → `POC.agent_memory` — durable facts about the *user*, **one document per fact** (`{user_key, fact, category, active, superseded_by}`), consolidated across conversations. Starting a new conversation wipes short-term but **not** long-term. Facts are extracted by a cheap Haiku pass that runs **concurrently with the agent loop** (the customer never waits for memory consolidation); four properties make this production-shaped:
   - **Memory is a query.** When a user has more facts than fit comfortably in the prompt, loading memory becomes a `$vectorSearch` over the facts (autoEmbed index `agent_memory_vs`) **pre-filtered natively** by `user_key` + `active` — only the facts relevant to *this* question are injected, so tokens don't grow with memory size.
   - **Supersession, not contradiction.** A new fact that contradicts an old one ("prefiro e-mail" after "prefiro WhatsApp") inserts the new doc and flips the old to `active: false` + `superseded_by` **in one ACID transaction**. Nothing is deleted — the inspector shows the struck-through history as an audit trail.
   - **The agent can't edit its own memory.** The tool loop enforces a per-collection write scope (`update-many` → `POC.support_orders` only); a "creative" agent trying to rewrite `agent_memory` gets denied in-app (visible in the trace) and the platform performs the auditable supersession instead.
+  - **Memory is data, never instructions.** Retrieved facts are injected inside explicit `<fatos_do_cliente>` delimiters with an instruction to ignore any command embedded in them, and the extractor refuses to store instruction-shaped "facts" — closing the *memory poisoning* vector (a user can't dictate a persistent rule into the agent's system prompt).
 
 **Guardrails whose policy and audit layers are MongoDB** (honest framing — Mongo is the policy store, semantic matcher, and system of record, not the toxicity classifier):
 - **Policy as a document** → `ai_brain.guardrail_policies` — PII regex, banned terms, and thresholds live in one editable doc; tightening a rule is an `update_one`, same live-config story as `model_config`.
-- **Semantic denylist** → `POC.guardrail_denylist` — forbidden example utterances stored with embeddings; an incoming message is `$vectorSearch`-ed against them and blocked if it's *semantically* close to a forbidden intent (leak another customer's data, prompt-injection, guaranteed-return advice) even when phrased differently.
-- **Audit log** → `POC.guardrail_events` — every check (allow / block / mask) is appended and queryable during the PoV, **with the text sample already PII-masked** (the governance log is never itself a leak). Output PII (CPF, card numbers) is redacted before the answer reaches the user.
-- **Observability** → `POC.agent_traces` — every agent turn's full replayable trace (phases, tool calls, latencies, cache/guardrail outcomes) is persisted as a document, queryable for debugging and compliance.
+- **Semantic denylist** → `POC.guardrail_denylist` — forbidden example utterances stored with embeddings; an incoming message is `$vectorSearch`-ed against them and blocked if it's *semantically* close to a forbidden intent (leak another customer's data, prompt-injection, guaranteed-return advice) even when phrased differently. Each area's policy also declares a `semantic_fail_mode`: if the semantic layer is ever unavailable, `default` fails **open** (regex still applies) while Financeiro fails **closed** — availability posture is policy, not code.
+- **PII never leaves the guardrail in the clear.** Input PII (CPF, card numbers) is masked **before** the message reaches the LLM, the cache, the memory extractor, the session document, or the trace; output PII is redacted again before the answer reaches the user. `agent_sessions`, `agent_traces` and `guardrail_events` therefore only ever store the masked text — no persisted collection is itself a leak.
+- **Audit log** → `POC.guardrail_events` — every check (allow / block / mask) is appended and queryable during the PoV. Auto-expires after 30 days via TTL index.
+- **Observability** → `POC.agent_traces` — every agent turn's full replayable trace (phases, tool calls, latencies, cache/guardrail outcomes) is persisted as a document, queryable for debugging and compliance. Auto-expires after 30 days via TTL index.
 
-> **Note on scores:** voyage-4 autoEmbed on this cluster compresses `vectorSearchScore` into a narrow band (~0.502 unrelated → ~0.506 near-duplicate) — the same regime as the RAG demo's `min_score: 0.5`. The cache (`0.504`) and denylist (`0.505`) thresholds are calibrated to that band; recalibrate if the embedding model or cluster changes.
+> **Note on scores (measured, not guessed):** voyage-4 autoEmbed on this cluster compresses `vectorSearchScore` into a narrow band — measured 2026-07 with `backend/calibrate_thresholds.py`: ~0.5014 unrelated → ~0.5056 for **identical** text (identical text does *not* score 1.0 in this regime). Ranking is reliable; the absolute scale is not. That's exactly why no threshold here is hardcoded folklore: the cache threshold lives in `ai_brain.cache_config` and the denylist thresholds in `ai_brain.guardrail_policies`, both set by the calibration script against labeled probe pairs and editable live. Re-run the script whenever the embedding model, cluster, or seeded data changes.
 
 **Collections at a glance** (all inspectable in Compass / the in-app 🔎 inspector):
 
 | Collection | Database | Role |
 |---|---|---|
+| `cache_config` | ai_brain | live-editable cache threshold/TTL (calibrated, zero-deploy) |
 | `semantic_cache` | POC | Q&A + autoEmbed vector (cache HIT/MISS), tagged per area |
 | `agent_sessions` | POC | short-term (per-conversation) memory |
 | `agent_memory` | POC | long-term (per-user) memory, keyed by `user_key` |
@@ -124,8 +131,17 @@ from there.
 
 **"What stops the agent from dropping a collection?"** Defense in depth, and the strongest layers live at the database:
 1. **App-side tool allowlist** — the loop only exposes `find`, `aggregate`, `count`, `collection-schema` and a single scoped write (`update-many`); no `delete`/`drop` tool ever reaches the model.
-2. **Database-side (recommended for production):** run the MCP Server with a dedicated Atlas database user scoped to `readWrite` on `POC` only — then even a prompt-injected agent physically cannot touch other databases. The MCP Server also supports a read-only mode (`MDB_MCP_READ_ONLY=true`) for retrieval-only agents.
-3. The MCP Server wraps all query results in a prompt-injection guard (visible in the raw tool output), and the input guardrail blocks injection attempts before the model is even called.
+2. **App-side write policy** — the write is scoped to `POC.support_orders` **and** its filter must target a specific `order_id`: a hallucinating (or injected) agent issuing `update-many` with an empty/broad filter is denied in-app before the MCP Server is ever touched — no mass-write is possible. Both denials are visible in the trace.
+3. **Database-side (recommended for production):** run the MCP Server with a dedicated Atlas database user scoped to `readWrite` on `POC` only — then even a prompt-injected agent physically cannot touch other databases. The MCP Server also supports a read-only mode (`MDB_MCP_READ_ONLY=true`) for retrieval-only agents.
+4. The MCP Server wraps all query results in a prompt-injection guard (visible in the raw tool output), and the input guardrail blocks injection attempts before the model is even called.
+
+## Production notes (deliberate PoV shortcuts)
+
+Three things are intentionally demo-shaped; say them out loud before an architect asks:
+
+1. **Identity comes from the UI switcher.** In production `user_key`/area come from real auth (JWT/OIDC), never from the client payload.
+2. **Orders are not tenant-scoped.** The demo lets any user look up any `PED-*` so the scripted scenarios work. In production, business-data reads get the customer's identity injected into the query filter by the app (the same pattern the memory already demonstrates with `user_key` as a native vector-index filter) — the model never decides *whose* data it can see.
+3. **The reset endpoints (`DELETE /api/cache`, `DELETE /api/memory/*`) are unauthenticated demo conveniences.** Disable or protect them anywhere that isn't a controlled demo network.
 
 ## Architecture
 
@@ -137,7 +153,7 @@ flowchart LR
         T3[Tab 3: Agent]
     end
 
-    subgraph Backend [FastAPI + Motor]
+    subgraph Backend [FastAPI + PyMongo Async]
         API[main.py]
         LLM[llm.py — reads model_config on every call]
         AGENT[agent.py — autonomous tool-use loop]
@@ -184,13 +200,19 @@ real thing, not a simulation.
    cd backend
    python3 -m venv .venv && source .venv/bin/activate
    pip install -r requirements.txt
-   python seed.py            # seeds ai_brain + POC (orders, cache FAQs, guardrail
-                             # policy + denylist) and creates the two autoEmbed
-                             # vector indexes (semantic_cache_vs, guardrail_denylist_vs)
+   python seed.py            # seeds ai_brain + POC (orders, cache FAQs, cache_config,
+                             # guardrail policies + denylist), runs idempotent schema
+                             # migrations, and creates the autoEmbed vector indexes
+                             # (semantic_cache_vs, guardrail_denylist_vs, agent_memory_vs)
+                             # + TTL indexes (cache, audit log, traces)
+   python calibrate_thresholds.py   # optional: re-measure the score band and
+                                    # suggest thresholds (--apply writes them)
    uvicorn main:app --reload --port 8000
    ```
 
-   On startup the backend opens a long-lived MongoDB MCP Server session (over stdio) and reuses it for every agent run.
+   On startup a background **supervisor task** owns the MongoDB MCP Server session
+   (over stdio): it pings it every 30s and reconnects with backoff if the process
+   dies — the agent recovers on its own, no backend restart needed.
 
 3. **Frontend**:
 

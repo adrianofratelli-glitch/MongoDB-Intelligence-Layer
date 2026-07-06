@@ -8,6 +8,9 @@ in documents") — is:
      Regex patterns for PII (CPF, cartão), banned terms, and the semantic
      denylist threshold all live in ONE editable document. Tightening a rule is
      an update_one, not a redeploy — the same live-config story as model_config.
+     `semantic_fail_mode` também é política: "open" (indisponibilidade do índice
+     não bloqueia — default) ou "closed" (área crítica bloqueia se a camada
+     semântica cair — ex.: Financeiro).
 
   2. Semantic denylist      → POC.guardrail_denylist  (Atlas Vector Search)
      Prohibited example utterances are stored WITH embeddings (autoEmbed). An
@@ -17,16 +20,20 @@ in documents") — is:
 
   3. Audit log              → POC.guardrail_events
      Every check (allowed or blocked, input and output) is appended, queryable
-     during the PoV to show governance/compliance evidence.
+     during the PoV to show governance/compliance evidence. Sempre com o texto
+     JÁ MASCARADO — o log de governança nunca é ele próprio um vazamento.
 
 Enforcement itself (running the regex, comparing the score) is app logic; Mongo
 is the policy store, the semantic matcher, and the system of record.
 """
 
+import logging
 import re
-import time
+from datetime import datetime, timezone
 
-from db import MAX_TIME_MS, ai_brain, poc, safe_query
+from db import MAX_TIME_MS, aggregate_list, ai_brain, poc, safe_query
+
+logger = logging.getLogger("poc.guardrails")
 
 POLICY_COLLECTION = "guardrail_policies"      # in ai_brain
 DENYLIST_COLLECTION = "guardrail_denylist"    # in POC (vector search)
@@ -35,8 +42,8 @@ DENYLIST_INDEX = "guardrail_denylist_vs"
 DENYLIST_PATH = "phrase"
 
 
-def _now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 async def get_policy(area: str = "default") -> dict:
@@ -62,17 +69,17 @@ async def get_policy(area: str = "default") -> dict:
     return doc or {}
 
 
-async def _semantic_denylist(text: str, threshold: float, area: str) -> dict | None:
+async def _semantic_denylist(text: str, threshold: float, area: str) -> tuple[dict | None, bool]:
     """$vectorSearch the message against forbidden example utterances.
+
+    Returns (match | None, available). `available=False` significa que a camada
+    semântica não pôde rodar (índice ausente) — quem decide se isso bloqueia é a
+    política da área (`semantic_fail_mode`), não este helper.
 
     Entries with area "global" apply everywhere; entries with a specific area only
     there. The scoping is a NATIVE pre-filter: `area` is a filter field in the
     vector index, so the ANN search only traverses applicable entries — the top
     match is always valid, no matter how large the denylist grows.
-
-    Fallbacks: if the index doesn't have the filter field yet (old definition),
-    retry unfiltered and post-filter app-side; if the index is missing entirely,
-    skip the semantic layer (fail open) so the demo never breaks.
     """
     def _pipeline(with_filter: bool) -> list[dict]:
         stage = {
@@ -92,17 +99,18 @@ async def _semantic_denylist(text: str, threshold: float, area: str) -> dict | N
 
     coll = poc()[DENYLIST_COLLECTION]
     try:
-        docs = await coll.aggregate(_pipeline(True), maxTimeMS=MAX_TIME_MS).to_list(length=1)
+        docs = await aggregate_list(coll, _pipeline(True), length=1, maxTimeMS=MAX_TIME_MS)
     except Exception:  # noqa: BLE001 — filtro não indexado → pós-filtro app-side
         try:
-            docs = await coll.aggregate(_pipeline(False), maxTimeMS=MAX_TIME_MS).to_list(length=5)
+            docs = await aggregate_list(coll, _pipeline(False), length=5, maxTimeMS=MAX_TIME_MS)
             docs = [d for d in docs if d.get("area") in (None, "global", area)]
-        except Exception:  # noqa: BLE001 — índice ausente → sem camada semântica
-            return None
+        except Exception as exc:  # noqa: BLE001 — índice ausente → camada indisponível
+            logger.warning("denylist semântico indisponível (área=%s): %s", area, exc)
+            return None, False
     if docs and float(docs[0].get("score", 0)) >= threshold:
         return {"phrase": docs[0].get("phrase"), "category": docs[0].get("category"),
-                "score": round(float(docs[0]["score"]), 4)}
-    return None
+                "score": round(float(docs[0]["score"]), 4)}, True
+    return None, True
 
 
 def _regex_hits(text: str, patterns: list[dict]) -> list[dict]:
@@ -138,20 +146,28 @@ async def check_input(text: str, user_key: str, session_id: str,
     """Guardrail on the incoming message. Blocks and logs when a rule fires.
 
     The policy and the denylist scope come from the user's AREA, so each area
-    enforces its own rules. Returns {allowed, action, violations, block_message}.
+    enforces its own rules. Returns {allowed, action, violations, block_message,
+    masked_text}. `masked_text` é a mensagem com PII redigida — é ESSA versão que
+    segue para o LLM, a memória e o trace (PII não sai do guardrail em claro).
     `action` is "allow" or "block". A blocked message never reaches the LLM.
     """
     policy = await get_policy(area)
     violations: list[dict] = []
 
     # 1) semantic denylist (MongoDB Vector Search), scoped to the area
-    threshold = float(policy.get("denylist_threshold", 0.86))
-    match = await _semantic_denylist(text, threshold, area)
+    threshold = float(policy.get("denylist_threshold", 0.505))
+    match, semantic_available = await _semantic_denylist(text, threshold, area)
     if match:
         violations.append({
             "rule": "denylist_semantico", "kind": "topico_proibido",
             "detail": f'próximo de "{match["phrase"]}" ({match["category"]})',
             "score": match["score"],
+        })
+    elif not semantic_available and policy.get("semantic_fail_mode", "open") == "closed":
+        # área crítica com fail-closed: sem camada semântica → não passa
+        violations.append({
+            "rule": "denylist_indisponivel", "kind": "fail_closed",
+            "detail": "camada semântica indisponível e a política da área é fail-closed",
         })
 
     # 2) banned terms (regex from the policy document)
@@ -159,12 +175,12 @@ async def check_input(text: str, user_key: str, session_id: str,
         violations.append({"rule": "termo_proibido", "kind": "conteudo",
                            "detail": hit["match"]})
 
-    # 3) PII sent by the user in the input (flagged, not masked — we still answer).
+    # 3) PII na entrada: mascarada ANTES de seguir adiante (LLM, memória, trace).
     # O valor detectado NUNCA sai em claro: nem na violation, nem no audit log.
-    pii = _regex_hits(text, policy.get("pii_patterns", []))
-    pii_flags = [{"rule": "pii_entrada", "kind": h["name"],
-                  "detail": f"{h['name']} detectado (valor mascarado)"}
-                 for h in pii]
+    masked_text, pii_fired = _mask(text, policy.get("pii_patterns", []))
+    pii_flags = [{"rule": "pii_entrada", "kind": name,
+                  "detail": f"{name} detectado (valor mascarado antes do LLM)"}
+                 for name in pii_fired]
 
     blocking = violations  # denylist + banned terms block; PII in input only warns
     allowed = not blocking
@@ -173,13 +189,14 @@ async def check_input(text: str, user_key: str, session_id: str,
 
     # audit log recebe a amostra JÁ MASCARADA — o log de governança não pode ser
     # ele próprio um vazamento de PII
-    masked_sample, _ = _mask(text, policy.get("pii_patterns", []))
-    await _log("input", masked_sample, action, all_violations, user_key, session_id, area)
+    await _log("input", masked_text, action, all_violations, user_key, session_id, area)
 
     return {
         "allowed": allowed,
         "action": action,
         "violations": all_violations,
+        "masked_text": masked_text,
+        "pii_masked": bool(pii_fired),
         "block_message": policy.get(
             "block_message",
             "Desculpe, não posso ajudar com esse pedido. Ele fere as políticas de uso.",
@@ -203,7 +220,7 @@ async def check_output(text: str, user_key: str, session_id: str,
 
 async def _log(stage: str, text: str, action: str, violations: list[dict],
                user_key: str, session_id: str, area: str = "default") -> None:
-    """Append an audit record to POC.guardrail_events."""
+    """Append an audit record to POC.guardrail_events (TTL de 30 dias via índice)."""
     await safe_query(
         poc()[EVENTS_COLLECTION].insert_one({
             "stage": stage,               # "input" | "output"
@@ -213,7 +230,7 @@ async def _log(stage: str, text: str, action: str, violations: list[dict],
             "user_key": user_key,
             "session_id": session_id,
             "area": area,
-            "at": _now(),
+            "at": _utcnow(),
         })
     )
 

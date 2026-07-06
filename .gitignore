@@ -12,6 +12,13 @@ dist/
 
 # misc
 .DS_Store
+.claude/
+
+# material interno de apresentação — nunca publicar
+*.pdf
+docs/pov-onepager*
+tmp/
+output/
 
 # playwright
 test-results/

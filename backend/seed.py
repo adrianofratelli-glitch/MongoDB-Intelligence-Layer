@@ -1,7 +1,9 @@
-"""Populates the ai_brain database (prompt_templates, model_config, intent_registry).
+"""Populates the ai_brain database (prompt_templates, model_config, cache_config,
+guardrail_policies, area_profiles) and the POC support domain.
 
-session_memory is created at runtime by the chat. Idempotent: uses replace_one
-with upsert, so it can be run as many times as you like.
+Idempotent: uses replace_one/update_one with upsert, so it can be run as many
+times as you like. Também aplica migrações de schema (datas string → BSON date,
+memória v1 → v2) e cria os índices regulares, TTL e vetoriais.
 
     python seed.py
 """
@@ -17,18 +19,6 @@ from pymongo import MongoClient
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 NOW = datetime.now(timezone.utc)
-
-# default rag_config — collection of 200K products already vectorized (autoEmbed voyage-4).
-# We do NOT create indexes or modify its documents; we only read via $vectorSearch.
-RAG_BASE = {
-    "database": "POC",
-    "collection": "produtos_vector",
-    "index": "produtos_vector",
-    "path": "descricao",  # source field for autoEmbed (voyage-4) — confirmed in the index definition
-    "num_candidates": 100,
-    "top_k": 5,
-    "min_score": 0.5,
-}
 
 # The variants have DIFFERENT structures from one another on purpose — that's the
 # point of the demo: polymorphic documents need no migration to diverge.
@@ -136,47 +126,24 @@ MODEL_CONFIG = {
     "updated_at": NOW,
 }
 
-INTENT_REGISTRY = [
-    {
-        "_id": "busca_produto",
-        "description": "Usuário procura um produto ou pergunta sobre características de um produto",
-        "examples": [
-            "tem fone de ouvido bluetooth?",
-            "qual notebook bom para estudar?",
-            "esse tênis tem na cor preta?",
-        ],
-        "prompt_template_id": "tmpl_product_assistant_v2",
-        "rag_config": {**RAG_BASE, "top_k": 5},
-        "active": True,
-        "updated_at": NOW,
+# Config viva do cache semântico — mesma história do model_config: recalibrar o
+# threshold é um update_one, não um deploy. IMPORTANTANTE sobre a escala: o
+# autoEmbed voyage-4 expõe o vectorSearchScore numa banda comprimida (medida
+# neste cluster em 2026-07: ~0.5014 não-relacionado → ~0.5056 texto IDÊNTICO).
+# O ranking é confiável; a escala absoluta não é — por isso o threshold é
+# calibrado por medição (backend/calibrate_thresholds.py), não por chute.
+CACHE_CONFIG = {
+    "_id": "cache_production",
+    "active": True,
+    "hit_threshold": 0.504,
+    "ttl_seconds": 24 * 3600,
+    "calibration": {
+        "method": "backend/calibrate_thresholds.py",
+        "measured_at": "2026-07-06",
+        "band": {"unrelated": 0.5014, "identical": 0.5056},
     },
-    {
-        "_id": "comparar_produtos",
-        "description": "Usuário quer comparar dois ou mais produtos entre si",
-        "examples": [
-            "qual a diferença entre o produto X e o Y?",
-            "melhor custo-benefício: A ou B?",
-            "compare essas duas cafeteiras",
-        ],
-        "prompt_template_id": "tmpl_product_comparator_v1",
-        "rag_config": {**RAG_BASE, "top_k": 6},
-        "active": True,
-        "updated_at": NOW,
-    },
-    {
-        "_id": "analise_reviews",
-        "description": "Usuário quer entender a reputação, avaliações ou pontos fortes/fracos de produtos",
-        "examples": [
-            "o que falam desse celular?",
-            "esse produto é bem avaliado?",
-            "quais os pontos fracos dessa TV?",
-        ],
-        "prompt_template_id": "tmpl_review_analyzer_v1",
-        "rag_config": {**RAG_BASE, "top_k": 5},
-        "active": True,
-        "updated_at": NOW,
-    },
-]
+    "updated_at": NOW,
+}
 
 
 # Support domain for the agent demo (Tab 3). The agent reads these orders through
@@ -308,8 +275,12 @@ GUARDRAIL_POLICY = {
     "active": True,
     "area": "default",
     # Score above which the semantic denylist blocks. Calibrated to this cluster's
-    # voyage-4 autoEmbed band (~0.503 benign → ~0.508 forbidden). Live-editable.
+    # voyage-4 autoEmbed band (~0.5036 benign → ~0.5078 forbidden) — medida com
+    # backend/calibrate_thresholds.py. Live-editable.
     "denylist_threshold": 0.505,
+    # Se a camada semântica cair (índice ausente/mongot fora): "open" = segue só
+    # com regex (default, demo nunca trava); "closed" = bloqueia (área crítica).
+    "semantic_fail_mode": "open",
     "block_message": (
         "Desculpe, não posso ajudar com esse pedido — ele contraria as políticas "
         "de uso e segurança."
@@ -333,6 +304,8 @@ GUARDRAIL_POLICY_FINANCEIRO = {
     "active": True,
     "area": "financeiro",
     "denylist_threshold": 0.5045,  # mais rígido que o default (0.505)
+    # Área crítica: sem camada semântica, a política manda BLOQUEAR (fail-closed)
+    "semantic_fail_mode": "closed",
     "block_message": (
         "Este assunto não pode ser tratado pelo canal do Financeiro — ele "
         "contraria as políticas da área. Procure o atendimento oficial."
@@ -470,8 +443,13 @@ def main():
     for tmpl in PROMPT_TEMPLATES:
         db["prompt_templates"].replace_one({"_id": tmpl["_id"]}, tmpl, upsert=True)
     db["model_config"].replace_one({"_id": MODEL_CONFIG["_id"]}, MODEL_CONFIG, upsert=True)
-    for intent in INTENT_REGISTRY:
-        db["intent_registry"].replace_one({"_id": intent["_id"]}, intent, upsert=True)
+    # Threshold do cache é config viva (calibrada) — preserva ajustes manuais de
+    # hit_threshold/ttl feitos ao vivo ($setOnInsert), só garante que o doc existe
+    db["cache_config"].update_one(
+        {"_id": CACHE_CONFIG["_id"]},
+        {"$setOnInsert": CACHE_CONFIG},
+        upsert=True,
+    )
 
     # Guardrail policies (live-editable config, same story as model_config):
     # one active policy per area — default + financeiro
@@ -518,7 +496,7 @@ def main():
                 },
                 "$setOnInsert": {
                     "hits": 0,
-                    "created_at": NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "created_at": NOW,
                     "last_hit_at": None,
                 },
             },
@@ -543,28 +521,66 @@ def main():
                 "category": f.get("category", "contexto"),
                 "active": True,
                 "source_session": f.get("source_session"),
-                "created_at": f.get("at", NOW.strftime("%Y-%m-%dT%H:%M:%SZ")),
-                "updated_at": f.get("at", NOW.strftime("%Y-%m-%dT%H:%M:%SZ")),
+                "created_at": f.get("at", NOW),
+                "updated_at": f.get("at", NOW),
                 "superseded_by": None,
             })
             migrated_facts += 1
         poc["agent_memory"].delete_one({"_id": legacy["_id"]})
-    if r1.modified_count or r2.modified_count or migrated_facts:
+
+    # 3) Datas gravadas como string ISO por versões antigas → BSON date. Datas
+    #    reais habilitam TTL, range queries e ordenação correta (string e date
+    #    não se ordenam juntas — type bracketing).
+    migrated_dates = 0
+    DATE_FIELDS = [
+        ("semantic_cache", ["created_at", "last_hit_at", "expires_at"]),
+        ("guardrail_events", ["at"]),
+        ("agent_memory", ["created_at", "updated_at"]),
+        ("agent_sessions", ["created_at", "updated_at"]),
+        ("agent_traces", ["at"]),
+    ]
+    for coll_name, fields in DATE_FIELDS:
+        for field in fields:
+            r = poc[coll_name].update_many(
+                {field: {"$type": "string"}},
+                [{"$set": {field: {"$toDate": f"${field}"}}}],
+            )
+            migrated_dates += r.modified_count
+    r = poc["agent_sessions"].update_many(
+        {"turns.at": {"$type": "string"}},
+        [{"$set": {"turns": {"$map": {
+            "input": "$turns", "as": "t",
+            "in": {"$mergeObjects": ["$$t", {"at": {"$toDate": "$$t.at"}}]},
+        }}}}],
+    )
+    migrated_dates += r.modified_count
+
+    if r1.modified_count or r2.modified_count or migrated_facts or migrated_dates:
         print(f"Migrações: cache={r1.modified_count} denylist={r2.modified_count} "
-              f"fatos_memoria={migrated_facts}")
+              f"fatos_memoria={migrated_facts} datas={migrated_dates}")
 
     # ---- Índices regulares (as queries quentes da camada de memória) ----
-    poc["agent_sessions"].create_index("session_id")
+    # session_id é ÚNICO: upserts concorrentes no mesmo id não podem duplicar a
+    # sessão. Se existir o índice antigo não-único, troca; se existirem dupes,
+    # avisa em vez de falhar o seed.
+    try:
+        poc["agent_sessions"].create_index("session_id", unique=True)
+    except Exception:  # noqa: BLE001 — índice antigo não-único ou dupes
+        try:
+            poc["agent_sessions"].drop_index("session_id_1")
+            poc["agent_sessions"].create_index("session_id", unique=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠ índice único em agent_sessions.session_id não criado: "
+                  f"{str(exc)[:120]}")
     poc["agent_memory"].create_index([("user_key", 1), ("active", 1)])
-    poc["guardrail_events"].create_index([("at", -1)])
     poc["agent_traces"].create_index([("conversation_id", 1), ("at", -1)])
     poc["app_users"].create_index("user_key", unique=True)
-    print("Índices regulares: agent_sessions, agent_memory, guardrail_events, "
-          "agent_traces, app_users")
+    print("Índices regulares: agent_sessions (único), agent_memory, agent_traces, "
+          "app_users")
 
     print("Seed concluído em ai_brain:")
-    for coll in ("prompt_templates", "model_config", "intent_registry",
-                 "session_memory", "guardrail_policies", "area_profiles"):
+    for coll in ("prompt_templates", "model_config", "cache_config",
+                 "guardrail_policies", "area_profiles"):
         print(f"  {coll}: {db[coll].count_documents({})} documentos")
 
     print("\nSeed concluído em POC:")
@@ -574,11 +590,21 @@ def main():
         print(f"  {coll}: {poc[coll].count_documents({})} documentos")
     print(f"  produtos_vector (somente leitura): ~{poc['produtos_vector'].estimated_document_count()} documentos")
 
-    # TTL index: runtime cache entries carry `expires_at` (BSON date) and Atlas
-    # deletes them automatically at that time — cache freshness with zero cron.
-    # Seeded FAQs have no `expires_at`, so TTL never touches them.
+    # TTL indexes: o banco expira os próprios dados, zero cron.
+    #  - semantic_cache: entradas de runtime carregam `expires_at` (date) e somem
+    #    na hora marcada; FAQs seedadas não têm o campo → nunca expiram.
+    #  - guardrail_events / agent_traces: telemetria/auditoria da PoV expira em
+    #    30 dias — as collections de observabilidade não crescem para sempre.
     poc["semantic_cache"].create_index("expires_at", expireAfterSeconds=0)
-    print("\nTTL: índice em semantic_cache.expires_at (entradas de runtime expiram sozinhas)")
+    AUDIT_TTL_DAYS = 30
+    for coll_name in ("guardrail_events", "agent_traces"):
+        try:  # índice antigo em `at` (sem TTL) fica redundante — remove
+            poc[coll_name].drop_index("at_-1")
+        except Exception:  # noqa: BLE001 — não existia
+            pass
+        poc[coll_name].create_index("at", expireAfterSeconds=AUDIT_TTL_DAYS * 24 * 3600)
+    print("\nTTL: semantic_cache.expires_at (runtime) · guardrail_events.at e "
+          f"agent_traces.at ({AUDIT_TTL_DAYS} dias)")
 
     print("\nÍndices vetoriais (autoEmbed voyage-4):")
     create_vector_indexes(client)

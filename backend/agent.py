@@ -9,9 +9,12 @@ and latency counters, so the frontend can replay the run with full controls.
 The MCP session is long-lived (opened once in the FastAPI lifespan) and reused.
 """
 
+import asyncio
+import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 
 from anthropic import AsyncAnthropic
 from mcp import ClientSession, StdioServerParameters
@@ -21,13 +24,20 @@ import cache
 import guardrails
 import memory
 import profiles
-from db import poc
+from db import MAX_TIME_MS, poc
 from llm import get_active_config
+
+logger = logging.getLogger("poc.agent")
 
 DEFAULT_USER_KEY = "cliente-demo"
 
 AGENT_MODEL = "claude-sonnet-4-5"  # default/fallback if model_config is unreadable
 MAX_ITERS = 6  # safety cap on tool-use rounds
+MAX_SESSION_TURNS = 200   # $slice no $push: turns[] nunca cresce sem limite
+HISTORY_TURNS = 6         # janela recente hidratada no contexto do loop (3 trocas)
+
+# Um único client HTTP para todos os turnos (pool de conexões reutilizado)
+anthropic_client = AsyncAnthropic()
 
 
 async def _resolve_agent_model() -> str:
@@ -49,6 +59,24 @@ ALLOWED_TOOLS = READ_TOOLS | WRITE_TOOLS
 # um agente "criativo" edita a própria memória e fura a trilha de auditoria
 # (supersessão). Enforcement no app, não só no prompt.
 WRITE_SCOPE = {"POC.support_orders"}
+# Além do escopo por collection, o FILTRO da escrita precisa mirar um pedido
+# específico: um agente alucinando (ou injetado) que tente update-many com
+# filtro vazio/amplo atualizaria a collection inteira. Defense in depth.
+WRITE_FILTER_REQUIRED_FIELD = "order_id"
+
+
+def _write_denial(tool_name: str, target: str, tool_input: dict) -> str | None:
+    """Política de escrita do app. Retorna a mensagem de negação, ou None se ok."""
+    if target not in WRITE_SCOPE:
+        return (f"Escrita negada pela política do app: {tool_name} só é permitido "
+                f"em {', '.join(sorted(WRITE_SCOPE))} (tentativa: {target}). "
+                "A memória do cliente é gerenciada pela plataforma.")
+    filt = tool_input.get("filter")
+    if not isinstance(filt, dict) or not filt.get(WRITE_FILTER_REQUIRED_FIELD):
+        return ("Escrita negada pela política do app: o filtro do update precisa "
+                f'referenciar um pedido específico (campo "{WRITE_FILTER_REQUIRED_FIELD}"). '
+                "Updates em massa não são permitidos ao agente.")
+    return None
 
 SYSTEM = """Você é um agente de atendimento de um e-commerce, com acesso ao banco \
 de dados MongoDB através de ferramentas (MongoDB MCP Server).
@@ -209,32 +237,42 @@ def _clean_for_display(text: str) -> str:
 
 
 def _memory_note(conversation_id: str) -> str:
-    """Per-run system note: where the session memory lives and how to recall it."""
+    """Per-run system note: where the session memory lives and how to recall it.
+
+    Padrão híbrido de memória curta: os últimos turnos já vêm hidratados no
+    contexto (referências implícitas funcionam); o histórico COMPLETO continua
+    sendo uma query em POC.agent_sessions — memória é um documento, não RAM.
+    """
     return (
-        "\n\nMemória da sessão: o histórico desta conversa fica salvo no MongoDB em "
+        "\n\nMemória da sessão: as mensagens mais recentes desta conversa já estão "
+        "no seu contexto. O histórico COMPLETO fica salvo no MongoDB em "
         f'POC.agent_sessions (session_id="{conversation_id}"). Se o cliente pedir para '
-        "recuperar, listar ou CONSOLIDAR as perguntas/mensagens anteriores desta "
-        "sessão, use a ferramenta find em POC.agent_sessions com o filtro "
+        "recuperar, listar ou CONSOLIDAR TODAS as perguntas/mensagens desta "
+        "sessão (além das recentes), use a ferramenta find em POC.agent_sessions com o filtro "
         f'{{"session_id": "{conversation_id}"}} para buscar o histórico salvo e '
         "responda a partir dele (não invente — use o que veio do documento)."
     )
 
 
-async def _run_tool_loop(session, tools, system, user_msg, emit, metrics, model) -> str:
+async def _run_tool_loop(session, tools, system, user_msg, emit, metrics, model,
+                         history: list[dict] | None = None) -> str:
     """The core Claude ↔ MongoDB MCP tool-use loop. Returns the final answer text.
+
+    `history` são os turnos recentes vindos de POC.agent_sessions (memória curta
+    hidratada no contexto — padrão híbrido).
 
     Latency: the system prompt and the (large) tool schemas are static across the
     loop's iterations, so we mark them with cache_control. From the 2nd iteration
     on, Anthropic serves them from the prompt cache — faster time-to-first-token
     and cheaper input tokens on every follow-up round.
     """
-    client = AsyncAnthropic()
+    client = anthropic_client
     system_blocks = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
     cached_tools = list(tools)
     if cached_tools:  # cache the whole tool-definitions block via the last entry
         cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
 
-    messages = [{"role": "user", "content": user_msg}]
+    messages = list(history or []) + [{"role": "user", "content": user_msg}]
     final_answer = ""
 
     for _ in range(MAX_ITERS):
@@ -267,11 +305,11 @@ async def _run_tool_loop(session, tools, system, user_msg, emit, metrics, model)
             phase = "act" if is_write else "retrieve"
             tt0 = time.perf_counter()
             target = f'{tu.input.get("database", "?")}.{tu.input.get("collection", "?")}'
-            if is_write and target not in WRITE_SCOPE:
-                # escrita fora do domínio de negócio: negada ANTES de tocar o MCP
-                text = (f"Escrita negada pela política do app: {tu.name} só é permitido "
-                        f"em {', '.join(sorted(WRITE_SCOPE))} (tentativa: {target}). "
-                        "A memória do cliente é gerenciada pela plataforma.")
+            denial = _write_denial(tu.name, target, dict(tu.input)) if is_write else None
+            if denial:
+                # escrita fora da política (collection ou filtro amplo): negada
+                # ANTES de tocar o MCP
+                text = denial
                 is_error = True
             else:
                 try:
@@ -305,9 +343,14 @@ async def _run_tool_loop(session, tools, system, user_msg, emit, metrics, model)
 
 async def _store_short_term(conversation_id, user_key, user_msg, final_answer,
                             emit, metrics) -> int:
-    """$push this turn onto POC.agent_sessions — short-term (conversational) memory."""
+    """$push this turn onto POC.agent_sessions — short-term (conversational) memory.
+
+    PII: `user_msg` chega aqui JÁ mascarado pelo guardrail de entrada e
+    `final_answer` já passou pelo guardrail de saída — nada é persistido em claro.
+    O $slice limita turns[] (arrays sem teto são anti-pattern de schema design).
+    """
     sg0 = time.perf_counter()
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    now = datetime.now(timezone.utc)
     coll = poc()["agent_sessions"]
     await coll.update_one(
         {"session_id": conversation_id},
@@ -317,7 +360,8 @@ async def _store_short_term(conversation_id, user_key, user_msg, final_answer,
                     "$each": [
                         {"role": "user", "content": user_msg, "at": now},
                         {"role": "assistant", "content": final_answer, "at": now},
-                    ]
+                    ],
+                    "$slice": -MAX_SESSION_TURNS,
                 }
             },
             "$setOnInsert": {"session_id": conversation_id, "created_at": now,
@@ -336,6 +380,23 @@ async def _store_short_term(conversation_id, user_key, user_msg, final_answer,
          result=f"Turno salvo em agent_sessions (curto prazo) — {turn_count} mensagens.",
          reads=metrics["reads"], writes=metrics["writes"])
     return turn_count
+
+
+async def _load_recent_history(conversation_id: str) -> list[dict]:
+    """Últimos turnos da conversa, para hidratar o contexto do loop (padrão
+    híbrido: janela recente em contexto + find para o histórico completo)."""
+    doc = await poc()["agent_sessions"].find_one(
+        {"session_id": conversation_id},
+        {"turns": {"$slice": -HISTORY_TURNS}},
+        max_time_ms=MAX_TIME_MS,
+    )
+    if not doc:
+        return []
+    return [
+        {"role": t["role"], "content": t["content"]}
+        for t in doc.get("turns", [])
+        if t.get("role") in ("user", "assistant") and t.get("content")
+    ]
 
 
 async def run_agent(
@@ -371,9 +432,6 @@ async def run_agent(
     def emit(phase, kind, **fields):
         trace.append({"phase": phase, "kind": kind, **fields})
 
-    # Perceive — the customer message enters the loop
-    emit("perceive", "message", actor="user", text=user_msg)
-
     # ---- Identity → area profile (persona + which policies apply) -------------
     # Who is talking decides which AREA rules the whole turn: persona in the
     # system prompt, guardrail policy, cache scope. Both are document reads.
@@ -383,19 +441,28 @@ async def run_agent(
     metrics["reads"] += 2  # app_users + area_profiles
     profile_info = {"area": area, "label": area_profile.get("label", area),
                     "user_key": user_key, "user_name": user.get("name", user_key)}
+
+    # ---- Guardrail (input), scoped to the user's area --------------------------
+    # PII na entrada é mascarada AQUI: daqui em diante user_msg é a versão
+    # redigida — é ela que vai para o LLM, o cache, a memória e o trace.
+    guard_in = await guardrails.check_input(user_msg, user_key, conversation_id, area)
+    metrics["reads"] += 1  # the denylist $vectorSearch
+    user_msg = guard_in.get("masked_text") or user_msg
+
+    # Perceive — the customer message enters the loop (já sem PII em claro)
+    emit("perceive", "message", actor="user", text=user_msg)
     emit("perceive", "tool_call", actor="mongodb", tool="find (app_users → area_profiles)",
          args={"database": "POC/ai_brain", "filter": {"user_key": user_key}},
          result=(f'Usuário "{user.get("name", user_key)}" → área "{profile_info["label"]}". '
                  "Persona, guardrails e cache deste turno seguem o perfil da área."),
          reads=metrics["reads"], writes=metrics["writes"])
-
-    # ---- Guardrail (input), scoped to the user's area --------------------------
-    guard_in = await guardrails.check_input(user_msg, user_key, conversation_id, area)
-    metrics["reads"] += 1  # the denylist $vectorSearch
     emit("perceive", "guardrail", actor="guardrail", stage="input",
          action=guard_in["action"], violations=guard_in["violations"],
          result=("Bloqueado pela política de guardrails."
-                 if not guard_in["allowed"] else "Entrada aprovada pelos guardrails."))
+                 if not guard_in["allowed"] else
+                 "Entrada aprovada pelos guardrails."
+                 + (" PII detectada foi mascarada antes do LLM."
+                    if guard_in.get("pii_masked") else "")))
 
     if not guard_in["allowed"]:
         # Blocked: never touch the LLM. Still record the turn for auditability.
@@ -435,6 +502,14 @@ async def run_agent(
                        trace, metrics, guard_in, cache_res, None, None, agent_model,
                        profile_info)
 
+    # ---- Long-term memory extraction: CONCORRENTE ao resto do turno -----------
+    # A extração (uma chamada Haiku + writes) roda em paralelo com o loop do
+    # agente — o cliente não paga a latência da consolidação de memória
+    # (latência percebida = max(loop, extração), não a soma).
+    mem_task = asyncio.create_task(
+        memory.extract_and_store(user_key, user_msg, conversation_id)
+    )
+
     # ---- Long-term memory: only the facts RELEVANT to this turn ---------------
     # $vectorSearch pré-filtrado (user_key + active são campos de filtro do índice):
     # a memória não é despejada inteira no prompt — é uma QUERY pela pergunta.
@@ -456,6 +531,20 @@ async def run_agent(
              result=detail,
              reads=metrics["reads"], writes=metrics["writes"])
 
+    # ---- Short-term memory: hidrata os turnos recentes no contexto ------------
+    # Padrão híbrido: janela recente em contexto (referências implícitas como
+    # "e o outro pedido?" funcionam) + find em agent_sessions para o histórico
+    # completo (a consolidação continua sendo uma query visível no MongoDB).
+    history = await _load_recent_history(conversation_id)
+    if history:
+        metrics["reads"] += 1
+        emit("retrieve", "tool_call", actor="mongodb", tool="find (agent_sessions)",
+             args={"database": "POC", "collection": "agent_sessions",
+                   "filter": {"session_id": conversation_id},
+                   "projection": {"turns": {"$slice": -HISTORY_TURNS}}},
+             result=f"Memória curta: últimos {len(history)} turno(s) hidratados no contexto.",
+             reads=metrics["reads"], writes=metrics["writes"])
+
     tools = await list_agent_tools(session)
     persona = (area_profile.get("persona") or "").strip()
     persona_block = (
@@ -465,7 +554,8 @@ async def run_agent(
     system = SYSTEM + persona_block + _memory_note(conversation_id) + memory.format_for_prompt(ltm)
 
     # ---- Agent tool-use loop --------------------------------------------------
-    final_answer = await _run_tool_loop(session, tools, system, user_msg, emit, metrics, agent_model)
+    final_answer = await _run_tool_loop(session, tools, system, user_msg, emit, metrics,
+                                        agent_model, history=history)
 
     # ---- Guardrail (output): redact PII before it reaches the user ------------
     guard_out = await guardrails.check_output(final_answer, user_key, conversation_id, area)
@@ -486,11 +576,17 @@ async def run_agent(
     mem_tx = False
     cache_stored = False
 
+    # ---- Long-term memory (extract durable facts → agent_memory) --------------
+    # A task foi disparada ANTES do loop e rodou em paralelo; aqui só colhemos o
+    # resultado. Roda em TODO turno respondido: "meu nome é X, cadê meu pedido?"
+    # precisa gravar o fato mesmo tendo usado ferramentas de negócio.
+    try:
+        mem_write = await mem_task
+    except Exception:  # noqa: BLE001 — falha na extração nunca derruba a resposta
+        logger.exception("extração de memória falhou (user_key=%s)", user_key)
+        mem_write = {"new": [], "superseded": [], "transaction": False}
+
     if final_answer:
-        # ---- Long-term memory (extract durable facts → agent_memory) ----------
-        # Roda em TODO turno respondido: "meu nome é X, cadê meu pedido?" precisa
-        # gravar o fato mesmo tendo usado ferramentas de negócio.
-        mem_write = await memory.extract_and_store(user_key, user_msg, conversation_id)
         new_facts = mem_write["new"]
         superseded = mem_write["superseded"]
         mem_tx = mem_write["transaction"]

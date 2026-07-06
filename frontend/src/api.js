@@ -46,31 +46,6 @@ export const api = {
   quickChat: (question) =>
     request('/api/chat/quick', { method: 'POST', body: JSON.stringify({ question }) }),
 
-  // Tab 3
-  createSession: () => request('/api/sessions', { method: 'POST' }),
-  getSession: (id) => request(`/api/sessions/${id}`),
-  sessionChat: (id, question) =>
-    request(`/api/sessions/${id}/chat`, {
-      method: 'POST',
-      body: JSON.stringify({ question }),
-    }),
-
-  // Tab 4
-  classify: (question) =>
-    request('/api/pipeline/classify', { method: 'POST', body: JSON.stringify({ question }) }),
-  route: (intent) =>
-    request('/api/pipeline/route', { method: 'POST', body: JSON.stringify({ intent }) }),
-  search: (question, intent) =>
-    request('/api/pipeline/search', {
-      method: 'POST',
-      body: JSON.stringify({ question, intent }),
-    }),
-  answer: (question, intent) =>
-    request('/api/pipeline/answer', {
-      method: 'POST',
-      body: JSON.stringify({ question, intent }),
-    }),
-
   // Tab 3 — Agent (autonomous loop via MongoDB MCP Server)
   users: () => request('/api/users'),
   agentScenarios: () => request('/api/agent/scenarios'),

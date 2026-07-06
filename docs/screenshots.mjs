@@ -40,5 +40,20 @@ await page.waitForFunction(
 await page.waitForTimeout(600);
 await page.screenshot({ path: OUT + 'tab3-agent.png', fullPage: true });
 
+// Tab 3 — semantic cache HIT: ask a seeded FAQ so the green CACHE HIT flag,
+// score and "served from MongoDB, no LLM" latency are all visible.
+const agentInput = page.locator('input[type="text"]:visible').first();
+await agentInput.fill('Qual o prazo pra trocar um produto que eu comprei?');
+await agentInput.press('Enter');
+await page.waitForFunction(
+  () => {
+    const active = document.querySelector('.phase-card.active .phase-label');
+    return active && active.textContent === 'Repetir';
+  },
+  { timeout: 60000 },
+);
+await page.waitForTimeout(600);
+await page.screenshot({ path: OUT + 'tab3-cache-hit.png' });
+
 await browser.close();
 console.log('Screenshots saved to docs/img/');
