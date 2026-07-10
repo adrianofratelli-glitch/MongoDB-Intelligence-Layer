@@ -209,7 +209,7 @@ export default function Agent({ state, setState }) {
     setWalk(false);
     const convId =
       (switched ? convMapRef.current[target.user_key]
-                : conversationId ?? convMapRef.current[target.user_key]) ?? `conv_${Date.now()}`;
+                : conversationId ?? convMapRef.current[target.user_key]) ?? null;
     try {
       const result = await api.agentRun({ ...payload, conversation_id: convId, user_key: target.user_key });
       const finalConvId = result.conversation_id ?? convId;
@@ -602,7 +602,9 @@ function FeatureFlags({ run }) {
   const newFacts = mem.new_facts?.length ?? 0;
   const superseded = mem.superseded?.length ?? 0;
   const memTitle = '🧠 Memória · curto + longo prazo';
-  const memDetail = `Curto: agent_sessions (${run.turn_count} msgs). Longo: agent_memory (${stFacts} fatos${newFacts ? `, +${newFacts} novo(s)` : ''}${superseded ? `, ${superseded} substituído(s)${mem.transaction ? ' em transação ACID' : ''}` : ''}).`;
+  const m = run.metrics ?? {};
+  const cacheTokens = m.cache_read_input_tokens ?? 0;
+  const memDetail = `Curto: agent_sessions (${run.turn_count} msgs). Longo: agent_memory (${stFacts} fatos${newFacts ? `, +${newFacts} novo(s)` : ''}${superseded ? `, ${superseded} substituído(s)${mem.transaction ? ' em transação ACID' : ''}` : ''}). LLM: ${m.input_tokens ?? 0}→${m.output_tokens ?? 0} tokens${cacheTokens ? ` · ${cacheTokens} reutilizados do prompt cache` : ''}.`;
 
   return (
     <div className="feat-flags">
@@ -649,7 +651,7 @@ function MongoInspector({ userKey, area, conversationId, run }) {
     try {
       if (tab === 'cache') setData({ cache: await api.cacheInspect() });
       else if (tab === 'short')
-        setData({ short: conversationId ? await api.memoryShort(conversationId) : { turns: [] } });
+        setData({ short: conversationId ? await api.memoryShort(conversationId, userKey) : { turns: [] } });
       else if (tab === 'memory') setData({ memory: await api.memoryInspect(userKey) });
       else if (tab === 'rules') setData({ rules: await api.guardrailsRules(area) });
       else setData({ events: await api.guardrailsEvents() });

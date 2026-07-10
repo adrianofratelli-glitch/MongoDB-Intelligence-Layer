@@ -21,7 +21,7 @@ async function request(path, options = {}) {
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     const err = body.error || {};
-    throw new ApiError(err.kind || 'erro', err.message || `Erro HTTP ${res.status}`);
+    throw new ApiError(err.kind || 'erro', err.message || body.detail || `Erro HTTP ${res.status}`);
   }
   return body;
 }
@@ -60,8 +60,8 @@ export const api = {
   memoryInspect: (userKey) => request(`/api/memory/${encodeURIComponent(userKey)}`),
   memoryClear: (userKey) =>
     request(`/api/memory/${encodeURIComponent(userKey)}`, { method: 'DELETE' }),
-  memoryShort: (conversationId) =>
-    request(`/api/memory-short/${encodeURIComponent(conversationId)}`),
+  memoryShort: (conversationId, userKey) =>
+    request(`/api/memory-short/${encodeURIComponent(conversationId)}?user_key=${encodeURIComponent(userKey)}`),
   guardrailsPolicy: () => request('/api/guardrails/policy'),
   guardrailsRules: (area) =>
     request(`/api/guardrails/rules${area ? `?area=${encodeURIComponent(area)}` : ''}`),

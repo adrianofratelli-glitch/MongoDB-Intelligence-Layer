@@ -28,6 +28,7 @@ import json
 from datetime import datetime, timezone
 
 from anthropic import AsyncAnthropic
+from bson import ObjectId
 
 from db import MAX_TIME_MS, aggregate_list, get_client, poc, safe_query
 
@@ -39,12 +40,19 @@ RELEVANT_LIMIT = 5                     # facts injected via $vectorSearch
 RECENT_MERGE = 2                       # freshest facts always merged in (autoEmbed
                                        # indexing is async — a fact written seconds
                                        # ago may not be searchable yet)
+MAX_PROMPT_MEMORY_CHARS = 1_200        # deterministic context budget for LTM
+MAX_FACT_CHARS = 280
+MAX_EXTRACTED_FACTS = 3
 
 client = AsyncAnthropic()
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.lower().split())
 
 
 def _fact_out(doc: dict) -> dict:
@@ -146,7 +154,7 @@ async def load_relevant(user_key: str, query: str) -> dict:
     return {**base, "facts": [_fact_out(d) for d in docs], "mode": mode}
 
 
-def format_for_prompt(ltm: dict) -> str:
+def format_for_prompt(ltm: dict, max_chars: int = MAX_PROMPT_MEMORY_CHARS) -> str:
     """Render LTM facts as a system-prompt block. Empty string when nothing is known.
 
     Os fatos vêm de mensagens do usuário (extraídos por LLM) — são DADOS
@@ -157,9 +165,17 @@ def format_for_prompt(ltm: dict) -> str:
     facts = ltm.get("facts", [])
     if not facts:
         return ""
-    lines = "\n".join(f"- {f['fact']}" for f in facts)
+    selected = []
+    used = 0
+    for fact in facts:
+        line = f"- {fact['fact']}"
+        if selected and used + len(line) + 1 > max_chars:
+            break
+        selected.append(line[:max_chars - used])
+        used += len(selected[-1]) + 1
+    lines = "\n".join(selected)
     picked = (
-        f"{len(facts)} fato(s) relevantes para esta pergunta, de "
+        f"{len(selected)} fato(s) relevantes para esta pergunta, de "
         f"{ltm.get('total_active', len(facts))} ativos"
         if ltm.get("mode") == "vector"
         else f"{len(facts)} fato(s)"
@@ -183,10 +199,11 @@ _EXTRACT_SCHEMA = {
     "properties": {
         "facts": {
             "type": "array",
+            "maxItems": MAX_EXTRACTED_FACTS,
             "items": {
                 "type": "object",
                 "properties": {
-                    "fact": {"type": "string"},
+                    "fact": {"type": "string", "maxLength": MAX_FACT_CHARS},
                     "category": {
                         "type": "string",
                         "enum": ["identidade", "preferencia", "historico", "contexto"],
@@ -216,7 +233,19 @@ async def extract_and_store(user_key: str, user_message: str, session_id: str) -
     fact replaces an old one, both writes (insert new + deactivate old) happen in
     ONE MongoDB transaction — the memory is never contradictory, even mid-crash.
     """
-    known_docs = await _active_docs(user_key)
+    # Consolidation must not re-send the entire memory on every turn. The same
+    # vector retrieval used by inference supplies only likely duplicates or
+    # contradictory facts, plus recent writes whose embedding may still lag.
+    candidates = await load_relevant(user_key, user_message)
+    known_docs = []
+    for item in candidates.get("facts", []):
+        try:
+            fact_id = ObjectId(item["_id"])
+        except Exception:  # legacy string ids remain supported in the POC
+            fact_id = item["_id"]
+        doc = await poc()[MEMORY_COLLECTION].find_one({"_id": fact_id})
+        if doc:
+            known_docs.append(doc)
     known_list = "\n".join(
         f"{i + 1}. {d['fact']}" for i, d in enumerate(known_docs)
     ) or "(nenhum)"
@@ -253,18 +282,41 @@ async def extract_and_store(user_key: str, user_message: str, session_id: str) -
     now = _utcnow()
     writes = []  # [(new_doc, old_id_or_None)]
     for c in candidates:
-        fact = (c.get("fact") or "").strip()
+        fact = (c.get("fact") or "").strip()[:MAX_FACT_CHARS]
         if not fact or fact.lower() in known_texts:
+            continue
+        # Exact duplicates are checked against the complete memory, not only the
+        # retrieval candidates, so semantic recall misses cannot create repeats.
+        duplicate = await poc()[MEMORY_COLLECTION].find_one(
+            {"user_key": user_key, "active": True, "fact_norm": _norm(fact)},
+            {"_id": 1}, max_time_ms=MAX_TIME_MS,
+        )
+        if duplicate:
             continue
         idx = int(c.get("replaces") or 0)
         old_id = known_docs[idx - 1]["_id"] if 0 < idx <= len(known_docs) else None
         writes.append((
-            {"user_key": user_key, "fact": fact,
+            {"user_key": user_key, "fact": fact, "fact_norm": _norm(fact),
              "category": c.get("category", "contexto"), "active": True,
              "source_session": session_id, "created_at": now, "updated_at": now,
              "superseded_by": None},
             old_id,
         ))
+    # Enforce the active-memory ceiling, rather than merely limiting what is read.
+    active_count = await safe_query(
+        poc()[MEMORY_COLLECTION].count_documents(
+            {"user_key": user_key, "active": True}, maxTimeMS=MAX_TIME_MS
+        )
+    )
+    remaining = max(0, MAX_ACTIVE_FACTS - active_count)
+    bounded_writes = []
+    for new_doc, old_id in writes:
+        if old_id is not None:
+            bounded_writes.append((new_doc, old_id))
+        elif remaining:
+            bounded_writes.append((new_doc, old_id))
+            remaining -= 1
+    writes = bounded_writes
     if not writes:
         return {"new": [], "superseded": [], "transaction": False}
 

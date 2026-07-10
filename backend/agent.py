@@ -10,6 +10,7 @@ The MCP session is long-lived (opened once in the FastAPI lifespan) and reused.
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -35,6 +36,15 @@ AGENT_MODEL = "claude-sonnet-4-5"  # default/fallback if model_config is unreada
 MAX_ITERS = 6  # safety cap on tool-use rounds
 MAX_SESSION_TURNS = 200   # $slice no $push: turns[] nunca cresce sem limite
 HISTORY_TURNS = 6         # janela recente hidratada no contexto do loop (3 trocas)
+MAX_USER_MESSAGE_CHARS = 4_000
+MAX_HISTORY_CHARS = 6_000
+MAX_TOOL_RESULT_CHARS = 1_500
+MAX_TRACE_RESULT_CHARS = 1_200
+
+# The provider tokenizes text, but character budgets are deterministic without
+# tying this MongoDB POC to a model-specific tokenizer. For Portuguese prose,
+# 4 chars/token is deliberately conservative enough to keep the context bounded.
+CHARS_PER_TOKEN_ESTIMATE = 4
 
 # Um único client HTTP para todos os turnos (pool de conexões reutilizado)
 anthropic_client = AsyncAnthropic()
@@ -51,7 +61,7 @@ async def _resolve_agent_model() -> str:
 
 # Curated tool allowlist — read tools + a single scoped write (update-many).
 # Keeps the loop tight and the demo predictable; no delete/drop reachable.
-READ_TOOLS = {"find", "aggregate", "count", "collection-schema"}
+READ_TOOLS = {"find", "aggregate"}
 WRITE_TOOLS = {"update-many"}
 ALLOWED_TOOLS = READ_TOOLS | WRITE_TOOLS
 # Escrita com ESCOPO por collection: o agente só pode escrever no domínio de
@@ -63,6 +73,11 @@ WRITE_SCOPE = {"POC.support_orders"}
 # específico: um agente alucinando (ou injetado) que tente update-many com
 # filtro vazio/amplo atualizaria a collection inteira. Defense in depth.
 WRITE_FILTER_REQUIRED_FIELD = "order_id"
+ALLOWED_ORDER_STATUSES = {"reembolso_solicitado", "troca_solicitada", "chamado_aberto"}
+ORDER_FIELDS_FOR_AGENT = {"_id": 0, "order_id": 1, "product_name": 1, "sku": 1,
+                          "status": 1, "unit_price": 1, "timeline": 1}
+SENSITIVE_FIELD_NAMES = {"name", "customer_name", "email", "address", "endereco",
+                         "cpf", "card", "cartao", "phone", "telefone"}
 
 
 def _write_denial(tool_name: str, target: str, tool_input: dict) -> str | None:
@@ -76,7 +91,52 @@ def _write_denial(tool_name: str, target: str, tool_input: dict) -> str | None:
         return ("Escrita negada pela política do app: o filtro do update precisa "
                 f'referenciar um pedido específico (campo "{WRITE_FILTER_REQUIRED_FIELD}"). '
                 "Updates em massa não são permitidos ao agente.")
+    update = tool_input.get("update")
+    status = ((update or {}).get("$set") or {}).get("status") if isinstance(update, dict) else None
+    if status not in ALLOWED_ORDER_STATUSES:
+        return ("Escrita negada pela política do app: o agente só pode alterar o status "
+                "para um estado de atendimento aprovado.")
     return None
+
+
+def _read_denial(tool_name: str, target: str, tool_input: dict,
+                 conversation_id: str, user_key: str) -> str | None:
+    """Enforce least privilege for reads before the MCP server is called."""
+    if tool_name == "find":
+        if target == "POC.support_orders":
+            filt = tool_input.get("filter")
+            if not isinstance(filt, dict) or not filt.get("order_id"):
+                return "Leitura negada: pedidos exigem filtro por order_id específico."
+            # The agent never needs the customer's identity to service an order.
+            tool_input["projection"] = ORDER_FIELDS_FOR_AGENT
+            return None
+        if target == "POC.agent_sessions":
+            requested = tool_input.get("filter")
+            if not isinstance(requested, dict) or requested.get("session_id") != conversation_id:
+                return "Leitura negada: o agente só pode consultar a conversa atual."
+            # Bind the conversation to its owner even if the model omits the filter.
+            tool_input["filter"] = {"session_id": conversation_id, "user_key": user_key}
+            tool_input["projection"] = {"_id": 0, "turns": 1}
+            return None
+        return f"Leitura negada: {tool_name} não é permitido em {target}."
+
+    if tool_name == "aggregate":
+        if target != "POC.produtos_vector":
+            return "Leitura negada: aggregate é permitido somente no catálogo vetorial."
+        pipeline = tool_input.get("pipeline")
+        if not isinstance(pipeline, list) or not pipeline or "$vectorSearch" not in pipeline[0]:
+            return "Leitura negada: o catálogo só pode ser consultado com $vectorSearch."
+        vector = pipeline[0]["$vectorSearch"]
+        if vector.get("index") != "produtos_vector":
+            return "Leitura negada: índice vetorial do catálogo inválido."
+        try:
+            vector["limit"] = min(max(int(vector.get("limit", 3)), 1), 3)
+            vector["numCandidates"] = min(max(int(vector.get("numCandidates", 100)), 1), 100)
+        except (TypeError, ValueError):
+            return "Leitura negada: limites do catálogo devem ser numéricos."
+        return None
+
+    return f"Leitura negada: ferramenta {tool_name} fora da política."
 
 SYSTEM = """Você é um agente de atendimento de um e-commerce, com acesso ao banco \
 de dados MongoDB através de ferramentas (MongoDB MCP Server).
@@ -213,9 +273,14 @@ async def list_agent_tools(session: ClientSession) -> list[dict]:
 
 
 def _tool_text(result) -> str:
-    """Flatten an MCP tool result into a string for the tool_result block."""
+    """Flatten an MCP tool result into a bounded tool_result block.
+
+    Tool output is part of the next model request. A strict cap prevents one
+    broad result from consuming the entire context budget.
+    """
     parts = [getattr(b, "text", "") for b in (result.content or [])]
-    return "\n".join(p for p in parts if p)[:4000]
+    text = "\n".join(p for p in parts if p)
+    return text[:MAX_TOOL_RESULT_CHARS]
 
 
 _GUARD_WARN = re.compile(
@@ -234,6 +299,46 @@ def _clean_for_display(text: str) -> str:
     text = _GUARD_WARN.sub("", text)
     text = _GUARD_TAGS.sub("", text)
     return text.strip()
+
+
+def _redact_trace_value(value):
+    """Remove sensitive fields from structured tool output before persisting it."""
+    if isinstance(value, list):
+        return [_redact_trace_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: ("«removido»" if key.lower() in SENSITIVE_FIELD_NAMES
+                  else _redact_trace_value(item))
+            for key, item in value.items()
+        }
+    return value
+
+
+def _safe_tool_display(text: str) -> str:
+    """Produce a replay-safe, bounded representation of an MCP result.
+
+    Expected tool results are JSON. Unknown/unstructured results are not copied
+    into `agent_traces`, because the trace is an observability surface rather
+    than a second data-access channel.
+    """
+    cleaned = _clean_for_display(text)
+    try:
+        safe = _redact_trace_value(json.loads(cleaned))
+        return json.dumps(safe, ensure_ascii=False)[:MAX_TRACE_RESULT_CHARS]
+    except (json.JSONDecodeError, TypeError):
+        return "Resultado protegido (formato não estruturado; não persistido no trace)."
+
+
+def _usage_metrics(usage) -> dict:
+    """Normalize Anthropic usage fields, including prompt-cache accounting."""
+    return {
+        "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+        "cache_read_input_tokens": int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+        "cache_creation_input_tokens": int(
+            getattr(usage, "cache_creation_input_tokens", 0) or 0
+        ),
+    }
 
 
 def _memory_note(conversation_id: str) -> str:
@@ -255,6 +360,7 @@ def _memory_note(conversation_id: str) -> str:
 
 
 async def _run_tool_loop(session, tools, system, user_msg, emit, metrics, model,
+                         conversation_id: str, user_key: str,
                          history: list[dict] | None = None) -> str:
     """The core Claude ↔ MongoDB MCP tool-use loop. Returns the final answer text.
 
@@ -286,12 +392,15 @@ async def _run_tool_loop(session, tools, system, user_msg, emit, metrics, model,
         )
         llm_ms = int((time.perf_counter() - t0) * 1000)
         metrics["latency_ms"] += llm_ms
+        usage = _usage_metrics(resp.usage)
+        for key, value in usage.items():
+            metrics[key] += value
 
         # Reason — the model's natural-language thinking before acting
         reasoning = "".join(b.text for b in resp.content if b.type == "text").strip()
         if reasoning:
             emit("reason", "reasoning", actor="llm", text=reasoning, latency_ms=llm_ms,
-                 model=resp.model, tokens=resp.usage.output_tokens)
+                 model=resp.model, **usage)
 
         tool_uses = [b for b in resp.content if b.type == "tool_use"]
         if not tool_uses:
@@ -304,8 +413,10 @@ async def _run_tool_loop(session, tools, system, user_msg, emit, metrics, model,
             is_write = tu.name in WRITE_TOOLS
             phase = "act" if is_write else "retrieve"
             tt0 = time.perf_counter()
-            target = f'{tu.input.get("database", "?")}.{tu.input.get("collection", "?")}'
-            denial = _write_denial(tu.name, target, dict(tu.input)) if is_write else None
+            tool_input = dict(tu.input)
+            target = f'{tool_input.get("database", "?")}.{tool_input.get("collection", "?")}'
+            denial = (_write_denial(tu.name, target, tool_input) if is_write
+                      else _read_denial(tu.name, target, tool_input, conversation_id, user_key))
             if denial:
                 # escrita fora da política (collection ou filtro amplo): negada
                 # ANTES de tocar o MCP
@@ -313,7 +424,7 @@ async def _run_tool_loop(session, tools, system, user_msg, emit, metrics, model,
                 is_error = True
             else:
                 try:
-                    result = await session.call_tool(tu.name, dict(tu.input))
+                    result = await session.call_tool(tu.name, tool_input)
                     text = _tool_text(result)
                     is_error = bool(getattr(result, "isError", False))
                 except Exception as e:  # surface tool failures into the trace, don't crash
@@ -329,7 +440,7 @@ async def _run_tool_loop(session, tools, system, user_msg, emit, metrics, model,
 
             emit(
                 phase, "tool_call", actor="mongodb", tool=tu.name,
-                args=dict(tu.input), result=_clean_for_display(text), is_error=is_error,
+                args=tool_input, result=_safe_tool_display(text), is_error=is_error,
                 latency_ms=tool_ms, reads=metrics["reads"], writes=metrics["writes"],
             )
             tool_results.append(
@@ -353,7 +464,7 @@ async def _store_short_term(conversation_id, user_key, user_msg, final_answer,
     now = datetime.now(timezone.utc)
     coll = poc()["agent_sessions"]
     await coll.update_one(
-        {"session_id": conversation_id},
+        {"session_id": conversation_id, "user_key": user_key},
         {
             "$push": {
                 "turns": {
@@ -370,33 +481,46 @@ async def _store_short_term(conversation_id, user_key, user_msg, final_answer,
         },
         upsert=True,
     )
-    doc = await coll.find_one({"session_id": conversation_id}, {"turns": 1})
+    doc = await coll.find_one(
+        {"session_id": conversation_id, "user_key": user_key}, {"turns": 1}
+    )
     turn_count = len(doc.get("turns", [])) if doc else 2
     metrics["writes"] += 1
     metrics["latency_ms"] += int((time.perf_counter() - sg0) * 1000)
     emit("store", "tool_call", actor="mongodb", tool="update-one ($push)",
          args={"database": "POC", "collection": "agent_sessions",
-               "filter": {"session_id": conversation_id}},
+               "filter": {"session_id": conversation_id, "user_key": user_key}},
          result=f"Turno salvo em agent_sessions (curto prazo) — {turn_count} mensagens.",
          reads=metrics["reads"], writes=metrics["writes"])
     return turn_count
 
 
-async def _load_recent_history(conversation_id: str) -> list[dict]:
+async def _load_recent_history(conversation_id: str, user_key: str) -> list[dict]:
     """Últimos turnos da conversa, para hidratar o contexto do loop (padrão
     híbrido: janela recente em contexto + find para o histórico completo)."""
     doc = await poc()["agent_sessions"].find_one(
-        {"session_id": conversation_id},
+        {"session_id": conversation_id, "user_key": user_key},
         {"turns": {"$slice": -HISTORY_TURNS}},
         max_time_ms=MAX_TIME_MS,
     )
     if not doc:
         return []
-    return [
+    turns = [
         {"role": t["role"], "content": t["content"]}
         for t in doc.get("turns", [])
         if t.get("role") in ("user", "assistant") and t.get("content")
     ]
+    # Keep the newest context that fits the deterministic budget, then restore
+    # chronological order so the conversation remains coherent.
+    selected: list[dict] = []
+    used = 0
+    for turn in reversed(turns[-HISTORY_TURNS:]):
+        size = len(turn["content"])
+        if selected and used + size > MAX_HISTORY_CHARS:
+            break
+        selected.append({**turn, "content": turn["content"][:MAX_HISTORY_CHARS - used]})
+        used += min(size, MAX_HISTORY_CHARS - used)
+    return list(reversed(selected))
 
 
 async def run_agent(
@@ -424,9 +548,31 @@ async def run_agent(
         user_msg = message.strip()
     else:
         raise ValueError("É preciso um cenário válido ou uma mensagem.")
+    if len(user_msg) > MAX_USER_MESSAGE_CHARS:
+        raise ValueError(
+            f"A mensagem excede o limite de {MAX_USER_MESSAGE_CHARS} caracteres para esta demonstração."
+        )
+
+    # A conversation id is opaque, but it is still client-provided in this POC.
+    # Reject a cross-user reuse before an upsert can append to another user's turn log.
+    existing_session = await poc()["agent_sessions"].find_one(
+        {"session_id": conversation_id}, {"user_key": 1}, max_time_ms=MAX_TIME_MS
+    )
+    if existing_session and existing_session.get("user_key") != user_key:
+        raise ValueError("Esta conversa pertence a outra identidade de demonstração.")
 
     trace: list[dict] = []
-    metrics = {"reads": 0, "writes": 0, "tools_used": 0, "latency_ms": 0}
+    metrics = {
+        "reads": 0, "writes": 0, "tools_used": 0, "latency_ms": 0,
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+        "context_budget": {
+            "history_chars": MAX_HISTORY_CHARS,
+            "memory_chars": memory.MAX_PROMPT_MEMORY_CHARS,
+            "tool_result_chars": MAX_TOOL_RESULT_CHARS,
+            "estimated_chars_per_token": CHARS_PER_TOKEN_ESTIMATE,
+        },
+    }
     agent_model = await _resolve_agent_model()  # live from model_config (Model Swap tab)
 
     def emit(phase, kind, **fields):
@@ -435,7 +581,7 @@ async def run_agent(
     # ---- Identity → area profile (persona + which policies apply) -------------
     # Who is talking decides which AREA rules the whole turn: persona in the
     # system prompt, guardrail policy, cache scope. Both are document reads.
-    user = await profiles.get_user(user_key)
+    user = await profiles.require_demo_user(user_key)
     area = user.get("area", profiles.DEFAULT_AREA)
     area_profile = await profiles.get_area_profile(area)
     metrics["reads"] += 2  # app_users + area_profiles
@@ -535,7 +681,7 @@ async def run_agent(
     # Padrão híbrido: janela recente em contexto (referências implícitas como
     # "e o outro pedido?" funcionam) + find em agent_sessions para o histórico
     # completo (a consolidação continua sendo uma query visível no MongoDB).
-    history = await _load_recent_history(conversation_id)
+    history = await _load_recent_history(conversation_id, user_key)
     if history:
         metrics["reads"] += 1
         emit("retrieve", "tool_call", actor="mongodb", tool="find (agent_sessions)",
@@ -554,8 +700,10 @@ async def run_agent(
     system = SYSTEM + persona_block + _memory_note(conversation_id) + memory.format_for_prompt(ltm)
 
     # ---- Agent tool-use loop --------------------------------------------------
-    final_answer = await _run_tool_loop(session, tools, system, user_msg, emit, metrics,
-                                        agent_model, history=history)
+    final_answer = await _run_tool_loop(
+        session, tools, system, user_msg, emit, metrics, agent_model,
+        conversation_id, user_key, history=history,
+    )
 
     # ---- Guardrail (output): redact PII before it reaches the user ------------
     guard_out = await guardrails.check_output(final_answer, user_key, conversation_id, area)

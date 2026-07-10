@@ -14,7 +14,7 @@ A área do usuário decide três isolamentos no pipeline:
 A memória (curto e longo prazo) já é isolada por user_key: cada usuário só vê a sua.
 """
 
-from db import MAX_TIME_MS, ai_brain, poc, safe_query
+from db import MAX_TIME_MS, SafeQueryError, ai_brain, poc, safe_query
 
 USERS_COLLECTION = "app_users"          # em POC
 PROFILES_COLLECTION = "area_profiles"   # em ai_brain
@@ -44,6 +44,23 @@ async def get_user(user_key: str) -> dict:
     )
     if not doc:
         return {"user_key": user_key, "name": user_key, "area": DEFAULT_AREA}
+    doc["_id"] = str(doc["_id"])
+    doc.setdefault("area", DEFAULT_AREA)
+    return doc
+
+
+async def require_demo_user(user_key: str) -> dict:
+    """Resolve only registered identities in the demo boundary.
+
+    Production replaces this boundary with a JWT/OIDC principal. Accepting an
+    arbitrary user_key here would let a caller create a new memory namespace and
+    weaken the isolation demonstrated by the POC.
+    """
+    doc = await safe_query(
+        poc()[USERS_COLLECTION].find_one({"user_key": user_key}, max_time_ms=MAX_TIME_MS)
+    )
+    if not doc:
+        raise SafeQueryError("identidade", "Identidade de demonstração não reconhecida.")
     doc["_id"] = str(doc["_id"])
     doc.setdefault("area", DEFAULT_AREA)
     return doc
