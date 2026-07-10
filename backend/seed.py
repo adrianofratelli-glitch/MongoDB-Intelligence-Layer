@@ -555,9 +555,21 @@ def main():
     )
     migrated_dates += r.modified_count
 
-    if r1.modified_count or r2.modified_count or migrated_facts or migrated_dates:
+    # 4) Normalized fact text supports exact duplicate suppression without
+    # placing every historical fact in the extraction prompt.
+    migrated_fact_norms = 0
+    for fact_doc in poc["agent_memory"].find({"fact_norm": {"$exists": False}}, {"fact": 1}):
+        fact_text = fact_doc.get("fact")
+        if isinstance(fact_text, str):
+            poc["agent_memory"].update_one(
+                {"_id": fact_doc["_id"]}, {"$set": {"fact_norm": _norm(fact_text)}}
+            )
+            migrated_fact_norms += 1
+
+    if r1.modified_count or r2.modified_count or migrated_facts or migrated_dates or migrated_fact_norms:
         print(f"Migrações: cache={r1.modified_count} denylist={r2.modified_count} "
-              f"fatos_memoria={migrated_facts} datas={migrated_dates}")
+              f"fatos_memoria={migrated_facts} datas={migrated_dates} "
+              f"fact_norm={migrated_fact_norms}")
 
     # ---- Índices regulares (as queries quentes da camada de memória) ----
     # session_id é ÚNICO: upserts concorrentes no mesmo id não podem duplicar a
@@ -573,6 +585,7 @@ def main():
             print(f"  ⚠ índice único em agent_sessions.session_id não criado: "
                   f"{str(exc)[:120]}")
     poc["agent_memory"].create_index([("user_key", 1), ("active", 1)])
+    poc["agent_memory"].create_index([("user_key", 1), ("active", 1), ("fact_norm", 1)])
     poc["agent_traces"].create_index([("conversation_id", 1), ("at", -1)])
     poc["app_users"].create_index("user_key", unique=True)
     print("Índices regulares: agent_sessions (único), agent_memory, agent_traces, "

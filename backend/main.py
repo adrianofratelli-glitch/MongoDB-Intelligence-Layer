@@ -19,12 +19,12 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from bson import ObjectId
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import cache
 import guardrails
@@ -309,9 +309,9 @@ async def agent_tools(request: Request):
 
 class AgentRunBody(BaseModel):
     scenario: str | None = None
-    message: str | None = None
-    conversation_id: str | None = None
-    user_key: str | None = None
+    message: str | None = Field(default=None, max_length=4_000)
+    conversation_id: str | None = Field(default=None, max_length=64)
+    user_key: str | None = Field(default=None, max_length=128)
 
 
 @app.post("/api/agent/run")
@@ -338,6 +338,8 @@ async def agent_run(request: Request, body: AgentRunBody):
         )
     except SafeQueryError:
         raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise SafeQueryError("agente", f"Falha ao executar o agente: {exc}")
 
@@ -384,14 +386,18 @@ async def cache_clear():
 @app.get("/api/memory/{user_key}")
 async def memory_inspect(user_key: str):
     """Long-term memory for a user: active facts + superseded history (audit)."""
+    await profiles.require_demo_user(user_key)
     return clean(await memory.load_longterm(user_key, include_history=True))
 
 
 @app.get("/api/memory-short/{conversation_id}")
-async def memory_short_inspect(conversation_id: str):
+async def memory_short_inspect(conversation_id: str, user_key: str):
     """Short-term memory (the current conversation's turns), from POC.agent_sessions."""
+    await profiles.require_demo_user(user_key)
     doc = await safe_query(
-        poc()["agent_sessions"].find_one({"session_id": conversation_id}, max_time_ms=MAX_TIME_MS)
+        poc()["agent_sessions"].find_one(
+            {"session_id": conversation_id, "user_key": user_key}, max_time_ms=MAX_TIME_MS
+        )
     )
     return clean(doc or {"session_id": conversation_id, "turns": [],
                          "collection": "POC.agent_sessions"})
@@ -400,6 +406,7 @@ async def memory_short_inspect(conversation_id: str):
 @app.delete("/api/memory/{user_key}")
 async def memory_clear(user_key: str):
     """Demo reset: forget everything about this user (long-term memory)."""
+    await profiles.require_demo_user(user_key)
     res = await safe_query(poc()["agent_memory"].delete_many({"user_key": user_key}))
     return {"deleted": res.deleted_count}
 
