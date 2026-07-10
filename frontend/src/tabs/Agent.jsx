@@ -604,7 +604,10 @@ function FeatureFlags({ run }) {
   const memTitle = '🧠 Memória · curto + longo prazo';
   const m = run.metrics ?? {};
   const cacheTokens = m.cache_read_input_tokens ?? 0;
-  const memDetail = `Curto: agent_sessions (${run.turn_count} msgs). Longo: agent_memory (${stFacts} fatos${newFacts ? `, +${newFacts} novo(s)` : ''}${superseded ? `, ${superseded} substituído(s)${mem.transaction ? ' em transação ACID' : ''}` : ''}). LLM: ${m.input_tokens ?? 0}→${m.output_tokens ?? 0} tokens${cacheTokens ? ` · ${cacheTokens} reutilizados do prompt cache` : ''}.`;
+  const extractor = m.memory_extraction_skipped
+    ? ' · extração LP evitada'
+    : ` · extrator ${m.memory_extractor_input_tokens ?? 0}→${m.memory_extractor_output_tokens ?? 0}`;
+  const memDetail = `Curto: agent_sessions (${run.turn_count} msgs). Longo: agent_memory (${stFacts} fatos${newFacts ? `, +${newFacts} novo(s)` : ''}${superseded ? `, ${superseded} substituído(s)${mem.transaction ? ' em transação ACID' : ''}` : ''}). LLM: ${m.input_tokens ?? 0}→${m.output_tokens ?? 0} tokens${extractor}${cacheTokens ? ` · ${cacheTokens} reutilizados do prompt cache` : ''}.`;
 
   return (
     <div className="feat-flags">

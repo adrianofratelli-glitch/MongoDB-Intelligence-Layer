@@ -78,6 +78,16 @@ ORDER_FIELDS_FOR_AGENT = {"_id": 0, "order_id": 1, "product_name": 1, "sku": 1,
                           "status": 1, "unit_price": 1, "timeline": 1}
 SENSITIVE_FIELD_NAMES = {"name", "customer_name", "email", "address", "endereco",
                          "cpf", "card", "cartao", "phone", "telefone"}
+ORDER_ID_RE = re.compile(r"PED-[0-9]{4,12}")
+
+
+def _specific_order_id(tool_input: dict) -> str | None:
+    """Return a safe scalar order id; reject operators and broad predicates."""
+    filt = tool_input.get("filter")
+    value = filt.get(WRITE_FILTER_REQUIRED_FIELD) if isinstance(filt, dict) else None
+    if isinstance(value, str) and ORDER_ID_RE.fullmatch(value):
+        return value
+    return None
 
 
 def _write_denial(tool_name: str, target: str, tool_input: dict) -> str | None:
@@ -86,8 +96,8 @@ def _write_denial(tool_name: str, target: str, tool_input: dict) -> str | None:
         return (f"Escrita negada pela política do app: {tool_name} só é permitido "
                 f"em {', '.join(sorted(WRITE_SCOPE))} (tentativa: {target}). "
                 "A memória do cliente é gerenciada pela plataforma.")
-    filt = tool_input.get("filter")
-    if not isinstance(filt, dict) or not filt.get(WRITE_FILTER_REQUIRED_FIELD):
+    order_id = _specific_order_id(tool_input)
+    if order_id is None:
         return ("Escrita negada pela política do app: o filtro do update precisa "
                 f'referenciar um pedido específico (campo "{WRITE_FILTER_REQUIRED_FIELD}"). '
                 "Updates em massa não são permitidos ao agente.")
@@ -96,6 +106,9 @@ def _write_denial(tool_name: str, target: str, tool_input: dict) -> str | None:
     if status not in ALLOWED_ORDER_STATUSES:
         return ("Escrita negada pela política do app: o agente só pode alterar o status "
                 "para um estado de atendimento aprovado.")
+    # Rewrite instead of merely validating: extra operators/fields never reach MCP.
+    tool_input["filter"] = {WRITE_FILTER_REQUIRED_FIELD: order_id}
+    tool_input["update"] = {"$set": {"status": status}}
     return None
 
 
@@ -104,10 +117,11 @@ def _read_denial(tool_name: str, target: str, tool_input: dict,
     """Enforce least privilege for reads before the MCP server is called."""
     if tool_name == "find":
         if target == "POC.support_orders":
-            filt = tool_input.get("filter")
-            if not isinstance(filt, dict) or not filt.get("order_id"):
+            order_id = _specific_order_id(tool_input)
+            if order_id is None:
                 return "Leitura negada: pedidos exigem filtro por order_id específico."
             # The agent never needs the customer's identity to service an order.
+            tool_input["filter"] = {"order_id": order_id}
             tool_input["projection"] = ORDER_FIELDS_FOR_AGENT
             return None
         if target == "POC.agent_sessions":
@@ -129,11 +143,23 @@ def _read_denial(tool_name: str, target: str, tool_input: dict,
         vector = pipeline[0]["$vectorSearch"]
         if vector.get("index") != "produtos_vector":
             return "Leitura negada: índice vetorial do catálogo inválido."
+        query = vector.get("query")
+        if not isinstance(query, str) or not query.strip() or len(query) > 500:
+            return "Leitura negada: consulta vetorial do catálogo inválida."
         try:
-            vector["limit"] = min(max(int(vector.get("limit", 3)), 1), 3)
-            vector["numCandidates"] = min(max(int(vector.get("numCandidates", 100)), 1), 100)
+            limit = min(max(int(vector.get("limit", 3)), 1), 3)
+            candidates = min(max(int(vector.get("numCandidates", 100)), limit), 100)
         except (TypeError, ValueError):
             return "Leitura negada: limites do catálogo devem ser numéricos."
+        # Replace the complete pipeline so $lookup/$out/$merge or broad projections
+        # supplied by the model cannot cross the data boundary.
+        tool_input["pipeline"] = [
+            {"$vectorSearch": {
+                "index": "produtos_vector", "path": "descricao",
+                "query": query.strip(), "numCandidates": candidates, "limit": limit,
+            }},
+            {"$project": {"nome": 1, "preco": 1, "_id": 0}},
+        ]
         return None
 
     return f"Leitura negada: ferramenta {tool_name} fora da política."
@@ -566,6 +592,8 @@ async def run_agent(
         "reads": 0, "writes": 0, "tools_used": 0, "latency_ms": 0,
         "input_tokens": 0, "output_tokens": 0,
         "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+        "memory_extractor_input_tokens": 0, "memory_extractor_output_tokens": 0,
+        "memory_extraction_skipped": False,
         "context_budget": {
             "history_chars": MAX_HISTORY_CHARS,
             "memory_chars": memory.MAX_PROMPT_MEMORY_CHARS,
@@ -648,14 +676,6 @@ async def run_agent(
                        trace, metrics, guard_in, cache_res, None, None, agent_model,
                        profile_info)
 
-    # ---- Long-term memory extraction: CONCORRENTE ao resto do turno -----------
-    # A extração (uma chamada Haiku + writes) roda em paralelo com o loop do
-    # agente — o cliente não paga a latência da consolidação de memória
-    # (latência percebida = max(loop, extração), não a soma).
-    mem_task = asyncio.create_task(
-        memory.extract_and_store(user_key, user_msg, conversation_id)
-    )
-
     # ---- Long-term memory: only the facts RELEVANT to this turn ---------------
     # $vectorSearch pré-filtrado (user_key + active são campos de filtro do índice):
     # a memória não é despejada inteira no prompt — é uma QUERY pela pergunta.
@@ -676,6 +696,18 @@ async def run_agent(
                    "filter": {"user_key": user_key, "active": True}},
              result=detail,
              reads=metrics["reads"], writes=metrics["writes"])
+
+    # ---- Long-term memory extraction: gated + concurrent ----------------------
+    # A local signal gate skips the paid extractor for ordinary transactional
+    # questions. When useful, consolidation reuses the already-retrieved memory
+    # candidates and runs concurrently with the agent loop.
+    mem_task = None
+    if memory.should_extract(user_msg):
+        mem_task = asyncio.create_task(
+            memory.extract_and_store(user_key, user_msg, conversation_id, relevant=ltm)
+        )
+    else:
+        metrics["memory_extraction_skipped"] = True
 
     # ---- Short-term memory: hidrata os turnos recentes no contexto ------------
     # Padrão híbrido: janela recente em contexto (referências implícitas como
@@ -725,14 +757,23 @@ async def run_agent(
     cache_stored = False
 
     # ---- Long-term memory (extract durable facts → agent_memory) --------------
-    # A task foi disparada ANTES do loop e rodou em paralelo; aqui só colhemos o
-    # resultado. Roda em TODO turno respondido: "meu nome é X, cadê meu pedido?"
-    # precisa gravar o fato mesmo tendo usado ferramentas de negócio.
-    try:
-        mem_write = await mem_task
-    except Exception:  # noqa: BLE001 — falha na extração nunca derruba a resposta
-        logger.exception("extração de memória falhou (user_key=%s)", user_key)
-        mem_write = {"new": [], "superseded": [], "transaction": False}
+    # Quando o gate detecta sinal durável, a task roda em paralelo com o loop;
+    # aqui só colhemos o resultado. Mensagens transacionais comuns economizam
+    # integralmente essa chamada ao modelo extrator.
+    if mem_task is None:
+        mem_write = {"new": [], "superseded": [], "transaction": False,
+                     "usage": {"input_tokens": 0, "output_tokens": 0}}
+    else:
+        try:
+            mem_write = await mem_task
+        except Exception:  # noqa: BLE001 — falha na extração nunca derruba a resposta
+            logger.exception("extração de memória falhou (user_key=%s)", user_key)
+            mem_write = {"new": [], "superseded": [], "transaction": False,
+                         "usage": {"input_tokens": 0, "output_tokens": 0}}
+
+    extractor_usage = mem_write.get("usage") or {}
+    metrics["memory_extractor_input_tokens"] = int(extractor_usage.get("input_tokens", 0))
+    metrics["memory_extractor_output_tokens"] = int(extractor_usage.get("output_tokens", 0))
 
     if final_answer:
         new_facts = mem_write["new"]
@@ -786,7 +827,12 @@ async def run_agent(
     return _result(scenario, user_msg, final_answer, conversation_id, turn_count,
                    trace, metrics, guard_in, cache_res,
                    {"new_facts": new_facts, "superseded": superseded,
-                    "transaction": mem_tx, "longterm": ltm_after}, guard_out,
+                    "transaction": mem_tx, "longterm": ltm_after,
+                    "extraction": {
+                        "skipped": metrics["memory_extraction_skipped"],
+                        "input_tokens": metrics["memory_extractor_input_tokens"],
+                        "output_tokens": metrics["memory_extractor_output_tokens"],
+                    }}, guard_out,
                    agent_model, profile_info)
 
 

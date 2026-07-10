@@ -36,7 +36,7 @@ Every agent turn now runs through a pipeline where **each step is a real MongoDB
 mensagem → [Guardrail entrada + máscara de PII] → [Cache semântico?] ──HIT──→ resposta (sem LLM) ⚡
                                         │ MISS
                                         ▼
-                (em paralelo: extração de fatos p/ memória LP — Haiku)
+        (se houver sinal durável: extração de fatos p/ memória LP — Haiku)
                                         ▼
         [memória LP relevante + últimos turnos CP] → loop do agente (MCP)
                                         ▼
@@ -85,7 +85,7 @@ payload — the switcher stands in for a login.
 
 **Two-tier memory, both in MongoDB:**
 - **Short-term** → `POC.agent_sessions` — the `turns[]` of the current conversation (`$slice`-capped; recent turns hydrated into context, full history queried on demand). "Nova conversa" resets it.
-- **Long-term** → `POC.agent_memory` — durable facts about the *user*, **one document per fact** (`{user_key, fact, category, active, superseded_by}`), consolidated across conversations. Starting a new conversation wipes short-term but **not** long-term. Facts are extracted by a cheap Haiku pass that runs **concurrently with the agent loop**; it receives only semantically relevant candidates for duplicate/supersession checking, not the full memory. Four properties make this production-shaped:
+- **Long-term** → `POC.agent_memory` — durable facts about the *user*, **one document per fact** (`{user_key, fact, category, active, superseded_by}`), consolidated across conversations. Starting a new conversation wipes short-term but **not** long-term. A local signal gate avoids the extraction call for ordinary transactional messages; eligible turns run a cheap Haiku pass **concurrently with the agent loop**, receiving only semantically relevant candidates for duplicate/supersession checking rather than the full memory. Four properties make this production-shaped:
   - **Memory is a query.** When a user has more facts than fit comfortably in the prompt, loading memory becomes a `$vectorSearch` over the facts (autoEmbed index `agent_memory_vs`) **pre-filtered natively** by `user_key` + `active` — only the facts relevant to *this* question are injected under a fixed memory budget, so tokens don't grow with memory size.
   - **Supersession, not contradiction.** A new fact that contradicts an old one ("prefiro e-mail" after "prefiro WhatsApp") inserts the new doc and flips the old to `active: false` + `superseded_by` **in one ACID transaction**. Nothing is deleted — the inspector shows the struck-through history as an audit trail.
   - **The agent has least-privilege tools.** It sees only `find`, `aggregate`, and one scoped `update-many`: orders require a specific `order_id`, catalog lookup requires `$vectorSearch`, session reads are forcibly bound to the current user/conversation, and writes can change only an approved order status. The agent cannot read or edit memory, policies, or arbitrary collections.
@@ -131,7 +131,7 @@ from there.
 
 **"What stops the agent from dropping a collection?"** Defense in depth, and the strongest layers live at the database:
 1. **App-side tool allowlist** — the loop only exposes `find`, `aggregate`, and a single scoped write (`update-many`); no `delete`/`drop`, count, or schema-enumeration tool reaches the model.
-2. **App-side read/write policy** — order reads require a specific `order_id` and return an explicit non-PII projection; catalog access requires `$vectorSearch`; session reads are bound to the current conversation and user. Writes are scoped to `POC.support_orders`, require a specific `order_id`, and can update only an approved status. A hallucinated broad or cross-collection operation is denied before the MCP Server is touched.
+2. **App-side read/write policy** — order reads require a scalar `PED-...` ID and are rewritten to an exact filter plus a non-PII projection; the catalog pipeline is replaced with a bounded `$vectorSearch` and minimal projection; session reads are bound to the current conversation and user. Writes are rewritten to an exact order filter and one approved status field. A broad, operator-based or cross-collection operation is denied or reduced before the MCP Server is touched.
 3. **Database-side (recommended for production):** run the MCP Server with a dedicated Atlas database user scoped to the exact collections/views required by the agent — not merely the whole database. The MCP Server also supports a read-only mode (`MDB_MCP_READ_ONLY=true`) for retrieval-only agents.
 4. The MCP Server wraps all query results in a prompt-injection guard (visible in the raw tool output), and the input guardrail blocks injection attempts before the model is even called.
 
@@ -223,6 +223,9 @@ real thing, not a simulation.
    ```
 
 The included `start.sh` boots both processes at once (FastAPI on :8000, Vite on :5173).
+
+For the current implementation invariants, file map, validation commands and
+known PoV boundaries, see [`docs/implementation-handoff.md`](docs/implementation-handoff.md).
 
 ## Docker
 

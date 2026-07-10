@@ -19,12 +19,13 @@ Why one document per fact:
      mesma TRANSAÇÃO em que o novo é gravado. A memória nunca fica contraditória
      e o histórico permanece auditável (o fato antigo não é apagado).
 
-LTM is filled by a cheap Haiku extraction after each user turn: it pulls stable
-facts, compares them against the user's known facts, and flags which old fact
-each new one replaces (if any).
+LTM is filled by a cheap Haiku extraction only when a local signal gate detects
+durable first-person information. It pulls stable facts, compares them against
+relevant known facts, and flags which old fact each new one replaces (if any).
 """
 
 import json
+import re
 from datetime import datetime, timezone
 
 from anthropic import AsyncAnthropic
@@ -44,6 +45,18 @@ MAX_PROMPT_MEMORY_CHARS = 1_200        # deterministic context budget for LTM
 MAX_FACT_CHARS = 280
 MAX_EXTRACTED_FACTS = 3
 
+# Cheap local gate: most support turns are transactional questions and contain
+# no durable user fact. Avoid paying for an extraction call unless the message
+# carries a first-person identity/preference/history signal. The extractor still
+# performs the authoritative decision and may return an empty list.
+_DURABLE_SIGNAL_RE = re.compile(
+    r"\b(meu nome|me chamo|pode me chamar|prefiro|preferência|preferencia|gosto de|"
+    r"não gosto de|meu contato|fale comigo|moro em|meu idioma|sou alérgico|"
+    r"sou alérgica|tenho alergia|costumo|"
+    r"sempre compro|já comprei)\b",
+    re.IGNORECASE,
+)
+
 client = AsyncAnthropic()
 
 
@@ -53,6 +66,18 @@ def _utcnow() -> datetime:
 
 def _norm(text: str) -> str:
     return " ".join(text.lower().split())
+
+
+def should_extract(user_message: str) -> bool:
+    """Whether a turn is worth sending to the long-term-memory extractor."""
+    return bool(_DURABLE_SIGNAL_RE.search(user_message))
+
+
+def _extractor_usage(usage) -> dict:
+    return {
+        "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+    }
 
 
 def _fact_out(doc: dict) -> dict:
@@ -226,7 +251,8 @@ _EXTRACT_SCHEMA = {
 }
 
 
-async def extract_and_store(user_key: str, user_message: str, session_id: str) -> dict:
+async def extract_and_store(user_key: str, user_message: str, session_id: str,
+                            relevant: dict | None = None) -> dict:
     """Extract durable facts from a user turn and merge them into LTM.
 
     Returns {"new": [...], "superseded": [...], "transaction": bool}. When a new
@@ -236,16 +262,22 @@ async def extract_and_store(user_key: str, user_message: str, session_id: str) -
     # Consolidation must not re-send the entire memory on every turn. The same
     # vector retrieval used by inference supplies only likely duplicates or
     # contradictory facts, plus recent writes whose embedding may still lag.
-    candidates = await load_relevant(user_key, user_message)
-    known_docs = []
-    for item in candidates.get("facts", []):
+    relevant = relevant or await load_relevant(user_key, user_message)
+    fact_ids = []
+    for item in relevant.get("facts", []):
         try:
-            fact_id = ObjectId(item["_id"])
+            fact_ids.append(ObjectId(item["_id"]))
         except Exception:  # legacy string ids remain supported in the POC
-            fact_id = item["_id"]
-        doc = await poc()[MEMORY_COLLECTION].find_one({"_id": fact_id})
-        if doc:
-            known_docs.append(doc)
+            fact_ids.append(item["_id"])
+    known_docs = []
+    if fact_ids:
+        cursor = poc()[MEMORY_COLLECTION].find(
+            {"_id": {"$in": fact_ids}, "user_key": user_key, "active": True},
+            max_time_ms=MAX_TIME_MS,
+        )
+        found = await safe_query(cursor.to_list(length=RELEVANT_LIMIT + RECENT_MERGE))
+        by_id = {str(doc["_id"]): doc for doc in found}
+        known_docs = [by_id[str(fact_id)] for fact_id in fact_ids if str(fact_id) in by_id]
     known_list = "\n".join(
         f"{i + 1}. {d['fact']}" for i, d in enumerate(known_docs)
     ) or "(nenhum)"
@@ -273,6 +305,7 @@ async def extract_and_store(user_key: str, user_message: str, session_id: str) -
         output_config={"format": {"type": "json_schema", "schema": _EXTRACT_SCHEMA}},
     )
     raw = next((b.text for b in resp.content if b.type == "text"), "{}")
+    usage = _extractor_usage(resp.usage)
     try:
         candidates = json.loads(raw).get("facts", [])
     except json.JSONDecodeError:
@@ -318,7 +351,7 @@ async def extract_and_store(user_key: str, user_message: str, session_id: str) -
             remaining -= 1
     writes = bounded_writes
     if not writes:
-        return {"new": [], "superseded": [], "transaction": False}
+        return {"new": [], "superseded": [], "transaction": False, "usage": usage}
 
     coll = poc()[MEMORY_COLLECTION]
     superseded = []
@@ -356,4 +389,5 @@ async def extract_and_store(user_key: str, user_message: str, session_id: str) -
                 for d, _ in writes],
         "superseded": superseded,
         "transaction": used_tx,
+        "usage": usage,
     }
