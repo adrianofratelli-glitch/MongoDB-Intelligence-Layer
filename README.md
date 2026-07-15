@@ -135,22 +135,6 @@ from there.
 3. **Database-side (recommended for production):** run the MCP Server with a dedicated Atlas database user scoped to the exact collections/views required by the agent — not merely the whole database. The MCP Server also supports a read-only mode (`MDB_MCP_READ_ONLY=true`) for retrieval-only agents.
 4. The MCP Server wraps all query results in a prompt-injection guard (visible in the raw tool output), and the input guardrail blocks injection attempts before the model is even called.
 
-## Production notes (remaining gaps)
-
-Identity, order ownership, and admin endpoints are already hardened (JWT-issued
-identity, `owner_user_key` enforced in both reads and writes, `ADMIN_API_KEY` on
-reset/config endpoints — see `docs/audit-multi-tenant-enterprise-readiness.md`).
-What's left before a production rollout:
-
-1. **JWT issuance is a demo issuer.** `POST /api/auth/token` signs tokens for
-   identities already registered in `POC.app_users`. Production swaps the
-   issuer for the customer's IdP (OIDC/JWKS); validation stays the same.
-2. **Network is public Atlas.** Fine for localhost/demo; production adds
-   PrivateLink or VPC peering.
-3. **Observability is process-local.** `/api/metrics` and JSON logs cover the
-   demo; production wires OpenTelemetry/CloudWatch on top of the same
-   instrumentation points.
-
 ## Architecture
 
 ```mermaid
