@@ -135,13 +135,21 @@ from there.
 3. **Database-side (recommended for production):** run the MCP Server with a dedicated Atlas database user scoped to the exact collections/views required by the agent — not merely the whole database. The MCP Server also supports a read-only mode (`MDB_MCP_READ_ONLY=true`) for retrieval-only agents.
 4. The MCP Server wraps all query results in a prompt-injection guard (visible in the raw tool output), and the input guardrail blocks injection attempts before the model is even called.
 
-## Production notes (deliberate PoV shortcuts)
+## Production notes (remaining gaps)
 
-Three things are intentionally demo-shaped; say them out loud before an architect asks:
+Identity, order ownership, and admin endpoints are already hardened (JWT-issued
+identity, `owner_user_key` enforced in both reads and writes, `ADMIN_API_KEY` on
+reset/config endpoints — see `docs/audit-multi-tenant-enterprise-readiness.md`).
+What's left before a production rollout:
 
-1. **Identity comes from the UI switcher.** The demo accepts only identities registered in `POC.app_users`, creates opaque conversation IDs on the server, and binds every session operation to that identity. In production, replace this demo boundary with a JWT/OIDC principal; never trust a client-supplied `user_key`/area.
-2. **Orders are not tenant-scoped.** The demo lets any user look up any `PED-*` so the scripted scenarios work. In production, business-data reads get the customer's identity injected into the query filter by the app (the same pattern the memory already demonstrates with `user_key` as a native vector-index filter) — the model never decides *whose* data it can see.
-3. **The reset endpoints (`DELETE /api/cache`, `DELETE /api/memory/*`) are unauthenticated demo conveniences.** Disable or protect them anywhere that isn't a controlled demo network.
+1. **JWT issuance is a demo issuer.** `POST /api/auth/token` signs tokens for
+   identities already registered in `POC.app_users`. Production swaps the
+   issuer for the customer's IdP (OIDC/JWKS); validation stays the same.
+2. **Network is public Atlas.** Fine for localhost/demo; production adds
+   PrivateLink or VPC peering.
+3. **Observability is process-local.** `/api/metrics` and JSON logs cover the
+   demo; production wires OpenTelemetry/CloudWatch on top of the same
+   instrumentation points.
 
 ## Architecture
 
