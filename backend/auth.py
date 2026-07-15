@@ -1,0 +1,77 @@
+"""Identidade por JWT — fecha o gap "user_key vem do payload".
+
+Fluxo demo: POST /api/auth/token troca um user_key cadastrado por um JWT
+assinado (HS256, segredo local). A partir daí o backend resolve a identidade
+do TOKEN (claim `sub`), nunca do corpo da request — impersonar outro usuário
+exigiria o segredo de assinatura, não apenas trocar uma string no JSON.
+
+Produção substitui a EMISSÃO pelo IdP corporativo (OIDC/JWKS): a validação
+continua a mesma, só troca a chave de verificação. `AUTH_REQUIRED=1` liga o
+modo estrito (request sem token válido é rejeitada); desligado, o backend
+aceita o fallback do payload para manter a demo plug-and-play, com warning.
+"""
+
+import logging
+import os
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from fastapi import HTTPException, Request
+
+logger = logging.getLogger("poc.auth")
+
+JWT_SECRET = os.getenv("JWT_SECRET", "")
+JWT_TTL_HOURS = float(os.getenv("JWT_TTL_HOURS", "8"))
+AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "0") == "1"
+_ALGO = "HS256"
+
+if not JWT_SECRET:
+    # Segredo efêmero por processo: tokens valem só até o restart. Suficiente
+    # para demo; produção define JWT_SECRET (ou usa JWKS do IdP).
+    JWT_SECRET = os.urandom(32).hex()
+    logger.warning(
+        "JWT_SECRET não definida — usando segredo efêmero (tokens invalidam no "
+        "restart). Defina a env var para tokens estáveis."
+    )
+if AUTH_REQUIRED:
+    logger.info("AUTH_REQUIRED=1 — requests sem Bearer token válido serão rejeitadas")
+else:
+    logger.warning(
+        "AUTH_REQUIRED desligado (modo demo): user_key do payload é aceito como "
+        "fallback quando não há token. Ligue com AUTH_REQUIRED=1."
+    )
+
+
+def issue_token(user_key: str, area: str, name: str = "") -> dict:
+    """Assina um JWT para uma identidade demo JÁ VALIDADA em app_users."""
+    now = datetime.now(timezone.utc)
+    exp = now + timedelta(hours=JWT_TTL_HOURS)
+    token = jwt.encode(
+        {"sub": user_key, "area": area, "name": name,
+         "iat": int(now.timestamp()), "exp": int(exp.timestamp()),
+         "iss": "intelligence-layer-poc"},
+        JWT_SECRET, algorithm=_ALGO,
+    )
+    return {"access_token": token, "token_type": "bearer",
+            "expires_at": exp.isoformat()}
+
+
+def resolve_user_key(request: Request, fallback: str | None) -> str | None:
+    """A identidade do turno: claim `sub` do Bearer token.
+
+    Com token válido, o `sub` VENCE qualquer user_key do payload (impersonação
+    via body deixa de existir). Sem token: 401 se AUTH_REQUIRED, senão fallback
+    do payload (modo demo).
+    """
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        token = header[7:].strip()
+        try:
+            claims = jwt.decode(token, JWT_SECRET, algorithms=[_ALGO],
+                                issuer="intelligence-layer-poc")
+            return claims.get("sub") or fallback
+        except jwt.InvalidTokenError as exc:
+            raise HTTPException(status_code=401, detail=f"Token inválido: {exc}")
+    if AUTH_REQUIRED:
+        raise HTTPException(status_code=401, detail="Bearer token obrigatório.")
+    return fallback

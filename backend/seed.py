@@ -380,6 +380,17 @@ VECTOR_INDEXES = [
      "path": "fact", "filters": ["user_key", "active"]},
 ]
 
+# BM25 (Atlas Search) sobre os fatos: metade lexical do retrieval híbrido da
+# memória longa (vector + BM25 fundidos com RRF em memory.load_relevant).
+BM25_INDEXES = [
+    {"db": "POC", "collection": "agent_memory", "name": "agent_memory_bm25",
+     "definition": {"mappings": {"dynamic": False, "fields": {
+         "fact": {"type": "string"},
+         "user_key": {"type": "token"},
+         "active": {"type": "boolean"},
+     }}}},
+]
+
 
 def _vector_index_definition(path: str, filters: list[str] | None = None) -> dict:
     """autoEmbed vector index: Atlas embeds `path` at write/query time (voyage-4).
@@ -435,10 +446,30 @@ def create_vector_indexes(client) -> None:
                     print(f"  ⚠ índice '{spec['name']}' existe mas não pude atualizar: "
                           f"{str(upd)[:120]}")
                 continue
-            print(f"  ⚠ não criei '{spec['name']}' em {spec['db']}.{spec['collection']}: "
+            print(f"  ⚠ não criei '{spec['name']}' em {spec['db']}.{spec['collection']}: "  # noqa: E501
                   f"{str(exc)[:120]}")
             print(f"     Crie manualmente no Atlas (Vector Search) com a definição:")
             print(f"     {definition}")
+
+    # BM25: mesma mecânica best-effort dos vetoriais
+    for spec in BM25_INDEXES:
+        coll = client[spec["db"]][spec["collection"]]
+        try:
+            if SearchIndexModel is not None:
+                coll.create_search_index(SearchIndexModel(
+                    definition=spec["definition"], name=spec["name"], type="search"))
+            else:
+                coll.create_search_index(
+                    {"name": spec["name"], "type": "search",
+                     "definition": spec["definition"]})
+            print(f"  ✓ índice BM25 '{spec['name']}' criado em "
+                  f"{spec['db']}.{spec['collection']}")
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc).lower()
+            if "already exists" in msg or "already defined" in msg or "duplicate" in msg:
+                print(f"  ✓ índice BM25 '{spec['name']}' já existe")
+            else:
+                print(f"  ⚠ não criei BM25 '{spec['name']}': {str(exc)[:120]}")
 
 
 def main():

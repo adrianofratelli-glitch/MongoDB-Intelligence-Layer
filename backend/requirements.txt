@@ -6,3 +6,5 @@ pymongo>=4.13,<5
 anthropic[mcp]>=0.109
 mcp>=1.0
 python-dotenv==1.*
+# JWT demo-issuer (produção troca a emissão pelo IdP corporativo via JWKS)
+pyjwt>=2.9,<3

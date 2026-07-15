@@ -30,9 +30,11 @@ from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 from pydantic import BaseModel, Field
 
+import auth
 import cache
 import guardrails
 import memory
+import observability
 import profiles
 from agent import (
     DEFAULT_USER_KEY,
@@ -46,6 +48,7 @@ from agent import (
 from db import MAX_TIME_MS, SafeQueryError, ai_brain, get_client, poc, safe_query
 from llm import call_with_fallback, get_active_config
 
+observability.setup_logging()
 logger = logging.getLogger("poc.main")
 
 MCP_PING_SECONDS = 30      # intervalo do health-check da sessão MCP
@@ -190,6 +193,30 @@ def enforce_rate_limit(identity: str) -> None:
                    "para esta identidade. Aguarde e tente novamente.",
         )
     window.append(now)
+
+
+@app.middleware("http")
+async def request_observability(request: Request, call_next):
+    """request_id em toda resposta + latência/erros por rota em /api/metrics."""
+    request_id = request.headers.get("x-request-id") or uuid4().hex[:16]
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        observability.metrics.observe(request.url.path, 500,
+                                      (time.perf_counter() - start) * 1000)
+        raise
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    observability.metrics.observe(request.url.path, response.status_code, elapsed_ms)
+    response.headers["X-Request-Id"] = request_id
+    return response
+
+
+@app.get("/api/metrics")
+async def api_metrics():
+    """Contadores em processo: requests/erros/latência por rota + contadores de
+    negócio (cache hits, bloqueios). Produção pluga OTel/Prometheus por cima."""
+    return observability.metrics.snapshot()
 
 
 @app.exception_handler(SafeQueryError)
@@ -347,10 +374,11 @@ async def quick_chat(body: QuickChatBody, request: Request):
     enforce_rate_limit(f"quick:{client_ip(request)}")
     area = "default"
     identity = "model-swap-demo"
-    if body.user_key:
-        user = await profiles.require_demo_user(body.user_key)
+    resolved = auth.resolve_user_key(request, body.user_key)
+    if resolved:
+        user = await profiles.require_demo_user(resolved)
         area = user.get("area", "default")
-        identity = body.user_key
+        identity = resolved
     guard = await guardrails.check_input(body.question, identity, "quick-chat", area)
     if not guard["allowed"]:
         return {
@@ -370,6 +398,21 @@ async def quick_chat(body: QuickChatBody, request: Request):
     guard_out = await guardrails.check_output(result["text"], identity, "quick-chat", area)
     result["text"] = guard_out["text"]
     return result
+
+
+# ---------- Auth (JWT demo-issuer; produção troca a emissão pelo IdP) ----------
+
+class TokenBody(BaseModel):
+    user_key: str = Field(max_length=128)
+
+
+@app.post("/api/auth/token")
+async def auth_token(body: TokenBody):
+    """Troca uma identidade demo cadastrada por um JWT. O switcher do frontend
+    é o 'login' da demo; produção substitui esta emissão por OIDC/JWKS."""
+    user = await profiles.require_demo_user(body.user_key)
+    return auth.issue_token(user["user_key"], user.get("area", "default"),
+                            user.get("name", ""))
 
 
 # ---------- Tab 3: Agent (autonomous loop via MongoDB MCP Server) ----------
@@ -431,10 +474,12 @@ async def agent_run(request: Request, body: AgentRunBody):
             "reconectar). Confira se o Node/npx está instalado e o cluster acessível. "
             + detail,
         )
+    # Identidade: claim `sub` do JWT vence o payload; payload é fallback demo
+    user_key = auth.resolve_user_key(request, body.user_key) or DEFAULT_USER_KEY
     # uuid4: id de conversa não-adivinhável (timestamp em segundos colide entre
     # usuários e é enumerável)
     # IP compõe a chave: rotacionar user_key não escapa do limite
-    enforce_rate_limit(f"agent:{client_ip(request)}:{body.user_key or DEFAULT_USER_KEY}")
+    enforce_rate_limit(f"agent:{client_ip(request)}:{user_key}")
     conversation_id = body.conversation_id or f"conv_{uuid4().hex[:16]}"
     try:
         result = await run_agent(
@@ -442,7 +487,7 @@ async def agent_run(request: Request, body: AgentRunBody):
             scenario=body.scenario,
             message=body.message,
             conversation_id=conversation_id,
-            user_key=body.user_key or DEFAULT_USER_KEY,
+            user_key=user_key,
         )
     except SafeQueryError:
         raise
@@ -451,13 +496,20 @@ async def agent_run(request: Request, body: AgentRunBody):
     except Exception as exc:  # noqa: BLE001
         raise SafeQueryError("agente", f"Falha ao executar o agente: {exc}")
 
+    # Contadores de negócio para /api/metrics
+    observability.metrics.bump("agent_turns")
+    if (result.get("cache") or {}).get("hit"):
+        observability.metrics.bump("cache_hits")
+    if ((result.get("guardrail") or {}).get("input") or {}).get("action") == "block":
+        observability.metrics.bump("guardrail_blocks")
+
     # Observabilidade: o trace replayável também é um documento (POC.agent_traces).
     # PII: user_message/answer/trace chegam aqui já mascarados pelos guardrails.
     # Best-effort: falha em gravar o trace nunca derruba a resposta ao usuário.
     try:
         await poc()["agent_traces"].insert_one({
             "conversation_id": result.get("conversation_id"),
-            "user_key": body.user_key or DEFAULT_USER_KEY,
+            "user_key": user_key,
             "area": (result.get("profile") or {}).get("area"),
             "scenario": result.get("scenario"),
             "user_message": result.get("user_message"),
@@ -494,15 +546,17 @@ async def cache_clear(request: Request):
 
 
 @app.get("/api/memory/{user_key}")
-async def memory_inspect(user_key: str):
+async def memory_inspect(user_key: str, request: Request):
     """Long-term memory for a user: active facts + superseded history (audit)."""
+    user_key = auth.resolve_user_key(request, user_key) or user_key
     await profiles.require_demo_user(user_key)
     return clean(await memory.load_longterm(user_key, include_history=True))
 
 
 @app.get("/api/memory-short/{conversation_id}")
-async def memory_short_inspect(conversation_id: str, user_key: str):
+async def memory_short_inspect(conversation_id: str, user_key: str, request: Request):
     """Short-term memory (the current conversation's turns), from POC.agent_sessions."""
+    user_key = auth.resolve_user_key(request, user_key) or user_key
     await profiles.require_demo_user(user_key)
     doc = await safe_query(
         poc()["agent_sessions"].find_one(
@@ -560,6 +614,7 @@ async def _scoped_area(request: Request, user_key: str | None,
     if area == "all":
         require_admin(request)
         return None
+    user_key = auth.resolve_user_key(request, user_key)
     if user_key:
         user = await profiles.require_demo_user(user_key)
         return user.get("area", "default")

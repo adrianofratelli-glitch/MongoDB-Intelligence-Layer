@@ -96,6 +96,12 @@ export default function Agent({ state, setState }) {
       .catch(() => {});
   }, []);
 
+  // "Login" da demo: trocar de identidade no switcher emite um JWT novo; toda
+  // request seguinte vai com Bearer e o backend resolve a identidade do token.
+  useEffect(() => {
+    if (user?.user_key) api.login(user.user_key).catch(() => {});
+  }, [user?.user_key]);
+
   const events = run?.trace ?? [];
   const lastStep = events.length - 1;
   const visible = step >= 0 ? events.slice(0, step + 1) : [];

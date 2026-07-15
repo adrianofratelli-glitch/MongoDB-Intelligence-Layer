@@ -8,11 +8,22 @@ export class ApiError extends Error {
   }
 }
 
+// JWT da identidade demo ativa: obtido em /api/auth/token quando o usuário é
+// trocado no switcher; enviado em toda request. O backend resolve a identidade
+// do token (claim sub), não do payload.
+let authToken = null;
+export function setAuthToken(token) {
+  authToken = token;
+}
+
 async function request(path, options = {}) {
   let res;
   try {
     res = await fetch(path, {
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      },
       ...options,
     });
   } catch {
@@ -28,6 +39,16 @@ async function request(path, options = {}) {
 
 export const api = {
   health: () => request('/api/health'),
+
+  // Auth — o switcher de identidade é o "login" da demo
+  login: async (userKey) => {
+    const tok = await request('/api/auth/token', {
+      method: 'POST',
+      body: JSON.stringify({ user_key: userKey }),
+    });
+    setAuthToken(tok.access_token);
+    return tok;
+  },
 
   // Tab 1
   listTemplates: () => request('/api/templates'),

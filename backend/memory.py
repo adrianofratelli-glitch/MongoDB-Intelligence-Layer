@@ -35,6 +35,8 @@ from db import MAX_TIME_MS, aggregate_list, get_client, poc, safe_query
 
 MEMORY_COLLECTION = "agent_memory"
 MEMORY_INDEX = "agent_memory_vs"       # autoEmbed vector index on `fact`
+BM25_INDEX = "agent_memory_bm25"       # Atlas Search (lexical) on `fact`
+RRF_K = 60                             # constante padrão do Reciprocal Rank Fusion
 EXTRACTOR_MODEL = "claude-haiku-4-5"
 MAX_ACTIVE_FACTS = 60                  # safety cap per user
 RELEVANT_LIMIT = 5                     # facts injected via $vectorSearch
@@ -126,29 +128,7 @@ async def load_longterm(user_key: str, include_history: bool = False) -> dict:
     return out
 
 
-async def load_relevant(user_key: str, query: str) -> dict:
-    """The facts RELEVANT to this turn — a pre-filtered $vectorSearch.
-
-    The vector index has `user_key` and `active` as FILTER fields, so the ANN
-    search only ever traverses this user's active facts — isolation is enforced
-    by the index, not by application code. Fallbacks (mode):
-      "all"    → few facts: skip the search, inject everything
-      "vector" → $vectorSearch top-K + the freshest facts merged in
-      "recent" → index unavailable: newest facts (never breaks the demo)
-    """
-    total = await safe_query(
-        poc()[MEMORY_COLLECTION].count_documents(
-            {"user_key": user_key, "active": True}, maxTimeMS=MAX_TIME_MS
-        )
-    )
-    base = {"user_key": user_key, "total_active": total,
-            "collection": f"POC.{MEMORY_COLLECTION}"}
-    if total == 0:
-        return {**base, "facts": [], "mode": "all"}
-    if total <= RELEVANT_LIMIT:
-        docs = await _active_docs(user_key)
-        return {**base, "facts": [_fact_out(d) for d in docs], "mode": "all"}
-
+async def _vector_candidates(user_key: str, query: str) -> list[dict]:
     pipeline = [
         {
             "$vectorSearch": {
@@ -165,10 +145,93 @@ async def load_relevant(user_key: str, query: str) -> dict:
         {"$project": {"fact": 1, "category": 1, "created_at": 1, "active": 1,
                       "superseded_by": 1, "score": {"$meta": "vectorSearchScore"}}},
     ]
+    return await aggregate_list(poc()[MEMORY_COLLECTION], pipeline,
+                                length=RELEVANT_LIMIT, maxTimeMS=MAX_TIME_MS)
+
+
+async def _bm25_candidates(user_key: str, query: str) -> list[dict]:
+    """Metade lexical do retrieval híbrido: $search (BM25) sobre os fatos,
+    com o MESMO isolamento por filtro (user_key + active) dentro do índice."""
+    pipeline = [
+        {
+            "$search": {
+                "index": BM25_INDEX,
+                "compound": {
+                    "must": [{"text": {"query": query, "path": "fact"}}],
+                    "filter": [
+                        {"equals": {"path": "user_key", "value": user_key}},
+                        {"equals": {"path": "active", "value": True}},
+                    ],
+                },
+            }
+        },
+        {"$limit": RELEVANT_LIMIT},
+        {"$project": {"fact": 1, "category": 1, "created_at": 1, "active": 1,
+                      "superseded_by": 1, "score": {"$meta": "searchScore"}}},
+    ]
+    return await aggregate_list(poc()[MEMORY_COLLECTION], pipeline,
+                                length=RELEVANT_LIMIT, maxTimeMS=MAX_TIME_MS)
+
+
+def _rrf_fuse(rankings: list[list[dict]], k: int = RRF_K) -> list[dict]:
+    """Reciprocal Rank Fusion: combina rankings sem calibrar escalas de score.
+
+    score(doc) = Σ 1/(k + posição). Um fato bem ranqueado nas DUAS buscas
+    (semântica e lexical) sobe; um fato forte numa só ainda entra. k=60 é a
+    constante clássica do paper — amortece a diferença entre topo e cauda.
+    """
+    fused: dict = {}
+    for ranking in rankings:
+        for pos, doc in enumerate(ranking):
+            key = str(doc["_id"])
+            entry = fused.setdefault(key, {"doc": doc, "rrf": 0.0})
+            entry["rrf"] += 1.0 / (k + pos + 1)
+    ordered = sorted(fused.values(), key=lambda e: e["rrf"], reverse=True)
+    out = []
+    for e in ordered:
+        doc = e["doc"]
+        doc["score"] = round(e["rrf"], 4)
+        out.append(doc)
+    return out
+
+
+async def load_relevant(user_key: str, query: str) -> dict:
+    """The facts RELEVANT to this turn — retrieval HÍBRIDO pré-filtrado.
+
+    Duas buscas em paralelo sobre os mesmos fatos, ambas com isolamento
+    (user_key + active) como campos de filtro DENTRO do índice:
+      · $vectorSearch (semântica — "prefere ser contatado à noite" acha
+        "não ligar durante o dia")
+      · $search BM25 (lexical — códigos, nomes próprios, termos exatos que
+        embedding dilui)
+    Os rankings são fundidos com Reciprocal Rank Fusion. Fallbacks (mode):
+      "all"    → few facts: skip the search, inject everything
+      "hybrid" → RRF(vector, bm25) + the freshest facts merged in
+      "vector" → BM25 indisponível (índice construindo): só semântica
+      "recent" → index unavailable: newest facts (never breaks the demo)
+    """
+    total = await safe_query(
+        poc()[MEMORY_COLLECTION].count_documents(
+            {"user_key": user_key, "active": True}, maxTimeMS=MAX_TIME_MS
+        )
+    )
+    base = {"user_key": user_key, "total_active": total,
+            "collection": f"POC.{MEMORY_COLLECTION}"}
+    if total == 0:
+        return {**base, "facts": [], "mode": "all"}
+    if total <= RELEVANT_LIMIT:
+        docs = await _active_docs(user_key)
+        return {**base, "facts": [_fact_out(d) for d in docs], "mode": "all"}
+
     try:
-        docs = await aggregate_list(poc()[MEMORY_COLLECTION], pipeline,
-                                    length=RELEVANT_LIMIT, maxTimeMS=MAX_TIME_MS)
-        mode = "vector"
+        vector_docs = await _vector_candidates(user_key, query)
+        try:
+            bm25_docs = await _bm25_candidates(user_key, query)
+            docs = _rrf_fuse([vector_docs, bm25_docs])[:RELEVANT_LIMIT]
+            mode = "hybrid"
+        except Exception:  # noqa: BLE001 — BM25 ausente/construindo → só vetor
+            docs = vector_docs
+            mode = "vector"
         # merge the freshest facts (autoEmbed indexing lag) and de-dupe by _id
         recent = await _active_docs(user_key, limit=RECENT_MERGE)
         seen = {d["_id"] for d in docs}
@@ -202,7 +265,7 @@ def format_for_prompt(ltm: dict, max_chars: int = MAX_PROMPT_MEMORY_CHARS) -> st
     picked = (
         f"{len(selected)} fato(s) relevantes para esta pergunta, de "
         f"{ltm.get('total_active', len(facts))} ativos"
-        if ltm.get("mode") == "vector"
+        if ltm.get("mode") in ("vector", "hybrid")
         else f"{len(facts)} fato(s)"
     )
     return (

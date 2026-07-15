@@ -772,16 +772,21 @@ async def run_agent(
     metrics["reads"] += 1
     if ltm.get("facts"):
         mode = ltm.get("mode")
-        tool = "$vectorSearch (agent_memory)" if mode == "vector" else "find (agent_memory)"
+        semantic = mode in ("vector", "hybrid")
+        tool = ("$vectorSearch + $search RRF (agent_memory)" if mode == "hybrid"
+                else "$vectorSearch (agent_memory)" if mode == "vector"
+                else "find (agent_memory)")
         detail = (
             f"Memória longo prazo: {len(ltm['facts'])} fato(s) relevantes à pergunta, "
-            f"de {ltm.get('total_active', 0)} ativos — retrieval semântico."
-            if mode == "vector" else
+            f"de {ltm.get('total_active', 0)} ativos — "
+            + ("retrieval híbrido (semântico + lexical, fusão RRF)."
+               if mode == "hybrid" else "retrieval semântico.")
+            if semantic else
             f"Memória longo prazo: {len(ltm['facts'])} fato(s) sobre o cliente."
         )
         emit("retrieve", "tool_call", actor="mongodb", tool=tool,
              args={"database": "POC", "collection": "agent_memory",
-                   "query": user_msg if mode == "vector" else None,
+                   "query": user_msg if semantic else None,
                    "filter": {"user_key": user_key, "active": True}},
              result=detail,
              reads=metrics["reads"], writes=metrics["writes"])
