@@ -63,6 +63,15 @@ async def get_config() -> dict:
     }
 
 
+def _area_visible(doc_area: str | None, area: str) -> bool:
+    """Isolation rule for the app-side postfilter path (mode "vector-postfilter").
+
+    Mirrors the native index filter `{"area": {"$in": ["global", area]}}`.
+    `None` means a seeded FAQ with no `area` field — treated as global.
+    """
+    return doc_area in (None, "global", area)
+
+
 async def lookup(question: str, area: str = "default") -> dict:
     """Return {hit, score, threshold, answer, question, source_id, latency_ms, mode}.
 
@@ -102,7 +111,7 @@ async def lookup(question: str, area: str = "default") -> dict:
     except Exception:  # noqa: BLE001 — filtro não indexado → pós-filtro app-side
         try:
             docs = await aggregate_list(coll, _pipeline(False), length=5, maxTimeMS=MAX_TIME_MS)
-            docs = [d for d in docs if d.get("area") in (None, "global", area)]
+            docs = [d for d in docs if _area_visible(d.get("area"), area)]
             mode = "vector-postfilter"
         except Exception:  # noqa: BLE001 — index not created yet → graceful fallback
             docs = await _exact_fallback(coll, question, area)

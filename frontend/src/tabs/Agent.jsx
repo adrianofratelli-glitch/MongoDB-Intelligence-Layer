@@ -657,7 +657,7 @@ function MongoInspector({ userKey, area, conversationId, run }) {
         setData({ short: conversationId ? await api.memoryShort(conversationId, userKey) : { turns: [] } });
       else if (tab === 'memory') setData({ memory: await api.memoryInspect(userKey) });
       else if (tab === 'rules') setData({ rules: await api.guardrailsRules(area) });
-      else setData({ events: await api.guardrailsEvents() });
+      else setData({ events: await api.guardrailsEvents(userKey) });
     } catch (e) {
       setErr(e.message);
     } finally {

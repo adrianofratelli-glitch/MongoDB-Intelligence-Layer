@@ -5,6 +5,7 @@ caching). Swapping the document in the database swaps the application's model
 live, with no restart and no deploy.
 """
 
+import os
 import time
 
 from anthropic import APIError, AsyncAnthropic
@@ -13,16 +14,45 @@ from db import MAX_TIME_MS, SafeQueryError, ai_brain, safe_query
 
 client = AsyncAnthropic()  # reads ANTHROPIC_API_KEY from the environment
 
+# Micro-cache opcional do model_config. Default 0 = DESLIGADO: a regra da demo
+# ("o doc é lido a cada request, swap é instantâneo") continua valendo. Em
+# produção, CONFIG_CACHE_SECONDS=5 corta uma leitura Mongo por chamada de LLM
+# ao custo de o swap propagar em até 5s.
+CONFIG_CACHE_SECONDS = float(os.getenv("CONFIG_CACHE_SECONDS", "0"))
+_config_cache: dict[str, tuple[float, dict]] = {}
 
-async def get_active_config() -> dict:
-    doc = await safe_query(
-        ai_brain()["model_config"].find_one({"active": True}, max_time_ms=MAX_TIME_MS)
-    )
+
+async def get_active_config(area: str = "default") -> dict:
+    """Config de modelo com escopo por ÁREA (tenant), com fallback para o doc
+    global. Um documento com {"area": "<área>", "active": true} sobrepõe a
+    config default só para aquele tenant — mesma história de config viva das
+    guardrail_policies, agora sem um swap global afetar todos os tenants.
+    """
+    if CONFIG_CACHE_SECONDS > 0:
+        cached = _config_cache.get(area)
+        if cached and time.monotonic() - cached[0] < CONFIG_CACHE_SECONDS:
+            return cached[1]
+    coll = ai_brain()["model_config"]
+    doc = None
+    if area and area != "default":
+        doc = await safe_query(
+            coll.find_one({"active": True, "area": area}, max_time_ms=MAX_TIME_MS)
+        )
+    if not doc:
+        doc = await safe_query(
+            coll.find_one(
+                {"active": True,
+                 "$or": [{"area": "default"}, {"area": {"$exists": False}}]},
+                max_time_ms=MAX_TIME_MS,
+            )
+        )
     if not doc:
         raise SafeQueryError(
             "config",
             "Nenhum documento ativo em ai_brain.model_config. Rode backend/seed.py.",
         )
+    if CONFIG_CACHE_SECONDS > 0:
+        _config_cache[area] = (time.monotonic(), doc)
     return doc
 
 
@@ -47,9 +77,10 @@ async def call_model(model_cfg: dict, system: str, messages: list[dict]) -> dict
     }
 
 
-async def call_with_fallback(system: str, messages: list[dict]) -> dict:
+async def call_with_fallback(system: str, messages: list[dict],
+                             area: str = "default") -> dict:
     """Reads model_config now, tries the primary and falls back on an API error."""
-    cfg = await get_active_config()
+    cfg = await get_active_config(area)
     try:
         result = await call_model(cfg["primary"], system, messages)
         result["route"] = "primary"

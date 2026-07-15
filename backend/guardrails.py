@@ -38,8 +38,10 @@ logger = logging.getLogger("poc.guardrails")
 POLICY_COLLECTION = "guardrail_policies"      # in ai_brain
 DENYLIST_COLLECTION = "guardrail_denylist"    # in POC (vector search)
 EVENTS_COLLECTION = "guardrail_events"        # in POC (audit log)
+CANDIDATES_COLLECTION = "guardrail_candidates"  # in POC (near-miss review queue)
 DENYLIST_INDEX = "guardrail_denylist_vs"
 DENYLIST_PATH = "phrase"
+NEAR_MISS_MARGIN = 0.05                       # score dentro de [threshold-margem, threshold) vira candidato
 
 
 def _utcnow() -> datetime:
@@ -69,12 +71,17 @@ async def get_policy(area: str = "default") -> dict:
     return doc or {}
 
 
-async def _semantic_denylist(text: str, threshold: float, area: str) -> tuple[dict | None, bool]:
+async def _semantic_denylist(
+    text: str, threshold: float, area: str
+) -> tuple[dict | None, bool, dict | None]:
     """$vectorSearch the message against forbidden example utterances.
 
-    Returns (match | None, available). `available=False` significa que a camada
-    semântica não pôde rodar (índice ausente) — quem decide se isso bloqueia é a
-    política da área (`semantic_fail_mode`), não este helper.
+    Returns (match | None, available, near_miss | None). `available=False`
+    significa que a camada semântica não pôde rodar (índice ausente) — quem
+    decide se isso bloqueia é a política da área (`semantic_fail_mode`), não
+    este helper. `near_miss` é o melhor candidato quando o score fica LOGO
+    ABAIXO do threshold (dentro de NEAR_MISS_MARGIN) — não bloqueia, mas é
+    sinal de possível tentativa que o denylist ainda não cobre.
 
     Entries with area "global" apply everywhere; entries with a specific area only
     there. The scoping is a NATIVE pre-filter: `area` is a filter field in the
@@ -106,11 +113,19 @@ async def _semantic_denylist(text: str, threshold: float, area: str) -> tuple[di
             docs = [d for d in docs if d.get("area") in (None, "global", area)]
         except Exception as exc:  # noqa: BLE001 — índice ausente → camada indisponível
             logger.warning("denylist semântico indisponível (área=%s): %s", area, exc)
-            return None, False
-    if docs and float(docs[0].get("score", 0)) >= threshold:
+            return None, False, None
+    if not docs:
+        return None, True, None
+    top_score = round(float(docs[0].get("score", 0)), 4)
+    if top_score >= threshold:
         return {"phrase": docs[0].get("phrase"), "category": docs[0].get("category"),
-                "score": round(float(docs[0]["score"]), 4)}, True
-    return None, True
+                "score": top_score}, True, None
+    if top_score >= threshold - NEAR_MISS_MARGIN:
+        return None, True, {
+            "closest_phrase": docs[0].get("phrase"), "category": docs[0].get("category"),
+            "score": top_score, "threshold": threshold,
+        }
+    return None, True, None
 
 
 def _regex_hits(text: str, patterns: list[dict]) -> list[dict]:
@@ -156,7 +171,9 @@ async def check_input(text: str, user_key: str, session_id: str,
 
     # 1) semantic denylist (MongoDB Vector Search), scoped to the area
     threshold = float(policy.get("denylist_threshold", 0.505))
-    match, semantic_available = await _semantic_denylist(text, threshold, area)
+    match, semantic_available, near_miss = await _semantic_denylist(text, threshold, area)
+    if near_miss:
+        await _log_candidate(text, near_miss, user_key, session_id, area)
     if match:
         violations.append({
             "rule": "denylist_semantico", "kind": "topico_proibido",
@@ -235,9 +252,97 @@ async def _log(stage: str, text: str, action: str, violations: list[dict],
     )
 
 
-async def recent_events(limit: int = 20) -> list[dict]:
-    """Latest audit records — powers the guardrails panel."""
-    cursor = poc()[EVENTS_COLLECTION].find({}, max_time_ms=MAX_TIME_MS).sort("at", -1).limit(limit)
+async def _log_candidate(text: str, near_miss: dict, user_key: str,
+                         session_id: str, area: str) -> None:
+    """Append a near-miss to POC.guardrail_candidates — a REVIEW QUEUE, not an
+    auto-updating denylist. Um usuário mal-intencionado poderia repetir a mesma
+    frase de propósito para 'treinar' o guardrail a bloquear algo legítimo de
+    outro cliente; por isso a promoção para o denylist exige aprovação humana
+    (review_candidate), nunca acontece sozinha.
+    """
+    await safe_query(
+        poc()[CANDIDATES_COLLECTION].insert_one({
+            "text_sample": text[:280],
+            "closest_phrase": near_miss["closest_phrase"],
+            "category": near_miss.get("category"),
+            "score": near_miss["score"],
+            "threshold": near_miss["threshold"],
+            "user_key": user_key,
+            "session_id": session_id,
+            "area": area,
+            "status": "pending",   # pending | approved | rejected
+            "at": _utcnow(),
+        })
+    )
+
+
+async def list_candidates(status: str = "pending", limit: int = 50,
+                          area: str | None = None) -> list[dict]:
+    """Fila de near-misses para revisão humana — powers the guardrails panel.
+
+    `area` escopa a fila ao tenant: sem ela (visão de operador/admin) vêm todas
+    as áreas; com ela, um tenant nunca vê candidato de outro.
+    """
+    query: dict = {} if status == "all" else {"status": status}
+    if area is not None:
+        query["area"] = area
+    cursor = (
+        poc()[CANDIDATES_COLLECTION]
+        .find(query, max_time_ms=MAX_TIME_MS)
+        .sort("at", -1)
+        .limit(limit)
+    )
+    docs = await safe_query(cursor.to_list(length=limit))
+    for d in docs:
+        d["_id"] = str(d["_id"])
+    return docs
+
+
+async def review_candidate(candidate_id: str, decision: str, reviewer: str = "") -> dict:
+    """Human-in-the-loop promotion: approve inserts the phrase into the live
+    denylist (autoEmbed indexa sozinho); reject só fecha o item. Nunca é
+    automático — é a política deliberada contra auto-envenenamento do denylist.
+    """
+    from bson import ObjectId
+
+    if decision not in ("approved", "rejected"):
+        raise ValueError("decision deve ser 'approved' ou 'rejected'")
+    if not ObjectId.is_valid(candidate_id):
+        raise ValueError("candidate_id inválido")
+    coll = poc()[CANDIDATES_COLLECTION]
+    cand = await safe_query(coll.find_one({"_id": ObjectId(candidate_id)}, max_time_ms=MAX_TIME_MS))
+    if not cand:
+        raise ValueError("candidato não encontrado")
+
+    now = _utcnow()
+    # condicionado a status=pending: revisão dupla não re-promove nem duplica
+    res = await safe_query(coll.update_one(
+        {"_id": cand["_id"], "status": "pending"},
+        {"$set": {"status": decision, "reviewed_by": reviewer[:64], "reviewed_at": now}},
+    ))
+    if res.modified_count == 0:
+        raise ValueError(f"candidato já revisado (status atual: {cand.get('status')})")
+
+    promoted = False
+    if decision == "approved":
+        await safe_query(poc()[DENYLIST_COLLECTION].insert_one({
+            "phrase": cand["text_sample"],
+            "category": cand.get("category", "aprendido_por_revisao"),
+            "area": cand.get("area", "global"),
+            "source_candidate": cand["_id"],
+            "at": now,
+        }))
+        promoted = True
+    return {"status": decision, "promoted": promoted}
+
+
+async def recent_events(limit: int = 20, area: str | None = None) -> list[dict]:
+    """Latest audit records — powers the guardrails panel.
+
+    `area` escopa o log ao tenant; sem ela é a visão de operador (todas as áreas).
+    """
+    query = {"area": area} if area is not None else {}
+    cursor = poc()[EVENTS_COLLECTION].find(query, max_time_ms=MAX_TIME_MS).sort("at", -1).limit(limit)
     docs = await safe_query(cursor.to_list(length=limit))
     for d in docs:
         d["_id"] = str(d["_id"])

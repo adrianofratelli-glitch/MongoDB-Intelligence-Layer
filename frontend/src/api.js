@@ -65,5 +65,6 @@ export const api = {
   guardrailsPolicy: () => request('/api/guardrails/policy'),
   guardrailsRules: (area) =>
     request(`/api/guardrails/rules${area ? `?area=${encodeURIComponent(area)}` : ''}`),
-  guardrailsEvents: () => request('/api/guardrails/events'),
+  guardrailsEvents: (userKey) =>
+    request(`/api/guardrails/events${userKey ? `?user_key=${encodeURIComponent(userKey)}` : ''}`),
 };

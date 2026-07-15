@@ -14,6 +14,10 @@ cancel scopes do anyio usados pelo cliente MCP.)
 
 import asyncio
 import logging
+import os
+import secrets
+import time
+from collections import defaultdict, deque
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -101,12 +105,91 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="MongoDB Intelligence Layer", lifespan=lifespan)
 
+# Origens permitidas configuráveis por ambiente (CSV) — atrás de um domínio real
+# basta setar CORS_ORIGINS, sem alteração de código.
+CORS_ORIGINS = [
+    o.strip() for o in os.getenv(
+        "CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+    ).split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------- Admin boundary + rate limiting ----------
+
+# Endpoints administrativos (config global, resets, aprovação de denylist) exigem
+# X-Admin-Key quando ADMIN_API_KEY está definida. Sem a env var o PoV roda em
+# modo demo aberto — com warning explícito no log, nunca silencioso.
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+if not ADMIN_API_KEY:
+    logger.warning(
+        "ADMIN_API_KEY não definida — endpoints administrativos abertos (modo demo). "
+        "Defina a env var para exigir X-Admin-Key."
+    )
+
+
+def require_admin(request: Request) -> None:
+    if not ADMIN_API_KEY:
+        return  # modo demo
+    supplied = request.headers.get("x-admin-key", "")
+    # compare em bytes: header não-ASCII não pode virar TypeError/500
+    if not secrets.compare_digest(supplied.encode(), ADMIN_API_KEY.encode()):
+        raise HTTPException(status_code=401, detail="X-Admin-Key ausente ou inválida.")
+
+
+# Rate limit por identidade (sliding window em memória, por processo). Protege o
+# fair use entre tenants na demo; produção usa gateway/API management na frente.
+# A chave inclui o IP do chamador: rotacionar user_key no payload não ganha
+# janela nova, e janelas vazias são removidas (sem crescimento sem teto).
+RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
+_rate_windows: dict[str, deque] = defaultdict(deque)
+
+
+def client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:  # atrás de proxy (uvicorn --proxy-headers / nginx)
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+async def admin_audit(action: str, request: Request, **details) -> None:
+    """Best-effort: toda ação administrativa vira documento em POC.admin_audit
+    (quem — IP —, o quê, quando). Falha no log nunca derruba a ação."""
+    try:
+        await poc()["admin_audit"].insert_one({
+            "action": action,
+            "ip": client_ip(request),
+            "details": details,
+            "at": datetime.now(timezone.utc),
+        })
+    except Exception:  # noqa: BLE001
+        logger.exception("falha ao gravar admin_audit (best-effort)")
+
+
+def enforce_rate_limit(identity: str) -> None:
+    now = time.monotonic()
+    for key in [k for k, w in _rate_windows.items() if k != identity]:
+        window = _rate_windows[key]
+        while window and now - window[0] > 60:
+            window.popleft()
+        if not window:
+            del _rate_windows[key]
+    window = _rate_windows[identity]
+    while window and now - window[0] > 60:
+        window.popleft()
+    if len(window) >= RATE_LIMIT_PER_MINUTE:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Limite de {RATE_LIMIT_PER_MINUTE} requisições/minuto atingido "
+                   "para esta identidade. Aguarde e tente novamente.",
+        )
+    window.append(now)
 
 
 @app.exception_handler(SafeQueryError)
@@ -180,8 +263,9 @@ class VariantBody(BaseModel):
 
 
 @app.post("/api/templates/{template_id}/variant")
-async def add_variant(template_id: str, body: VariantBody):
+async def add_variant(template_id: str, body: VariantBody, request: Request):
     """Real $set on Atlas: adds a new variant to the document — zero migration."""
+    require_admin(request)
     variant = {
         "system": f"Você é um assistente de catálogo otimizado para {body.model_name}.",
         "user_template": "Contexto: {{rag_chunks}}\n\nPergunta: {{question}}",
@@ -202,8 +286,9 @@ async def add_variant(template_id: str, body: VariantBody):
 
 
 @app.delete("/api/templates/{template_id}/variant/{model_name}")
-async def remove_variant(template_id: str, model_name: str):
+async def remove_variant(template_id: str, model_name: str, request: Request):
     """Demo reset: $unset the variant added live."""
+    require_admin(request)
     await safe_query(
         ai_brain()["prompt_templates"].update_one(
             {"_id": template_id},
@@ -221,9 +306,18 @@ async def model_config():
 
 
 @app.post("/api/model-config/swap")
-async def swap_models():
-    """Real update_one: swaps primary ↔ fallback. The backend reads the doc on every request."""
-    cfg = await get_active_config()
+async def swap_models(request: Request, area: str = "default"):
+    """Real update_one: swaps primary ↔ fallback. The backend reads the doc on every request.
+
+    `area` limita o swap ao documento de config daquela área quando existir
+    (fallback: doc global) — a troca deixa de ser cegamente global."""
+    require_admin(request)
+    cfg = await get_active_config(area)
+    if not cfg.get("fallback") or not cfg.get("primary"):
+        raise HTTPException(status_code=400,
+                            detail="Config sem primary/fallback — swap indisponível.")
+    await admin_audit("model_swap", request, area=area,
+                      new_primary=cfg["fallback"].get("model"))
     await safe_query(
         ai_brain()["model_config"].update_one(
             {"_id": cfg["_id"]},
@@ -236,20 +330,28 @@ async def swap_models():
             },
         )
     )
-    return clean(await get_active_config())
+    return clean(await get_active_config(area))
 
 
 class QuickChatBody(BaseModel):
-    question: str
+    question: str = Field(max_length=4_000)
+    user_key: str | None = Field(default=None, max_length=128)
 
 
 @app.post("/api/chat/quick")
-async def quick_chat(body: QuickChatBody):
+async def quick_chat(body: QuickChatBody, request: Request):
     """Chat do Model Swap. Guardrail de entrada TAMBÉM aqui: proteção é
-    transversal — nenhum endpoint que chama o LLM fica fora da política."""
-    guard = await guardrails.check_input(
-        body.question, "model-swap-demo", "quick-chat", "default"
-    )
+    transversal — nenhum endpoint que chama o LLM fica fora da política.
+    Com user_key, área do usuário governa política, config de modelo e trilha
+    de auditoria; sem ele, área default (demo)."""
+    enforce_rate_limit(f"quick:{client_ip(request)}")
+    area = "default"
+    identity = "model-swap-demo"
+    if body.user_key:
+        user = await profiles.require_demo_user(body.user_key)
+        area = user.get("area", "default")
+        identity = body.user_key
+    guard = await guardrails.check_input(body.question, identity, "quick-chat", area)
     if not guard["allowed"]:
         return {
             "text": guard["block_message"],
@@ -262,7 +364,11 @@ async def quick_chat(body: QuickChatBody):
     result = await call_with_fallback(
         system="Você é um assistente de e-commerce. Responda em português, em poucas frases.",
         messages=[{"role": "user", "content": guard.get("masked_text") or body.question}],
+        area=area,
     )
+    # PII na saída mascarada aqui também — mesma regra do agente
+    guard_out = await guardrails.check_output(result["text"], identity, "quick-chat", area)
+    result["text"] = guard_out["text"]
     return result
 
 
@@ -327,6 +433,8 @@ async def agent_run(request: Request, body: AgentRunBody):
         )
     # uuid4: id de conversa não-adivinhável (timestamp em segundos colide entre
     # usuários e é enumerável)
+    # IP compõe a chave: rotacionar user_key não escapa do limite
+    enforce_rate_limit(f"agent:{client_ip(request)}:{body.user_key or DEFAULT_USER_KEY}")
     conversation_id = body.conversation_id or f"conv_{uuid4().hex[:16]}"
     try:
         result = await run_agent(
@@ -378,8 +486,10 @@ async def cache_inspect():
 
 
 @app.delete("/api/cache")
-async def cache_clear():
+async def cache_clear(request: Request):
     """Demo reset: empty the cache so the next question is a guaranteed MISS."""
+    require_admin(request)
+    await admin_audit("cache_clear", request)
     return {"deleted": await cache.clear()}
 
 
@@ -404,9 +514,11 @@ async def memory_short_inspect(conversation_id: str, user_key: str):
 
 
 @app.delete("/api/memory/{user_key}")
-async def memory_clear(user_key: str):
+async def memory_clear(user_key: str, request: Request):
     """Demo reset: forget everything about this user (long-term memory)."""
+    require_admin(request)
     await profiles.require_demo_user(user_key)
+    await admin_audit("memory_clear", request, user_key=user_key)
     res = await safe_query(poc()["agent_memory"].delete_many({"user_key": user_key}))
     return {"deleted": res.deleted_count}
 
@@ -437,8 +549,59 @@ async def guardrails_rules(area: str = "default"):
     })
 
 
+async def _scoped_area(request: Request, user_key: str | None,
+                       area: str | None) -> str | None:
+    """Resolve o escopo de área de um endpoint de auditoria.
+
+    A área NUNCA é auto-declarada: vem do documento do usuário (mesma fronteira
+    demo dos endpoints de memória) ou, para visão de operador (`area=all` ou
+    área explícita), da admin key. Retorna None = todas as áreas (operador).
+    """
+    if area == "all":
+        require_admin(request)
+        return None
+    if user_key:
+        user = await profiles.require_demo_user(user_key)
+        return user.get("area", "default")
+    if area:  # área explícita sem identidade = operador
+        require_admin(request)
+        return area
+    return "default"
+
+
 @app.get("/api/guardrails/events")
-async def guardrails_events():
-    """Latest guardrail audit records from POC.guardrail_events."""
-    return clean({"events": await guardrails.recent_events(),
+async def guardrails_events(request: Request, user_key: str | None = None,
+                            area: str | None = None):
+    """Latest guardrail audit records from POC.guardrail_events, SCOPED ao
+    tenant do user_key informado. Visão de outra área ou de todas exige admin."""
+    scoped = await _scoped_area(request, user_key, area)
+    return clean({"events": await guardrails.recent_events(area=scoped),
+                  "area": scoped or "all",
                   "collection": f"POC.{guardrails.EVENTS_COLLECTION}"})
+
+
+@app.get("/api/guardrails/candidates")
+async def guardrails_candidates(request: Request, status: str = "pending",
+                                user_key: str | None = None,
+                                area: str | None = None):
+    """Near-misses aguardando revisão humana antes de virarem denylist.
+    Escopado ao tenant do user_key; outra área ou fila completa exige admin."""
+    scoped = await _scoped_area(request, user_key, area)
+    return clean({"candidates": await guardrails.list_candidates(status, area=scoped),
+                  "area": scoped or "all",
+                  "collection": f"POC.{guardrails.CANDIDATES_COLLECTION}"})
+
+
+@app.post("/api/guardrails/candidates/{candidate_id}/review")
+async def guardrails_review_candidate(candidate_id: str, decision: str,
+                                      request: Request, reviewer: str = ""):
+    """Aprova (promove ao denylist) ou rejeita um candidato near-miss.
+    Promoção muda a política viva → operação administrativa."""
+    require_admin(request)
+    await admin_audit("guardrail_candidate_review", request,
+                      candidate_id=candidate_id, decision=decision,
+                      reviewer=reviewer[:64])
+    try:
+        return clean(await guardrails.review_candidate(candidate_id, decision, reviewer))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

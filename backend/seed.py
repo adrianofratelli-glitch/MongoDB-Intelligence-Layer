@@ -153,6 +153,7 @@ CACHE_CONFIG = {
 SUPPORT_ORDERS = [
     {
         "order_id": "PED-1001",
+        "owner_user_key": "cliente-demo",
         "customer_name": "Adriano Souza",
         "product_name": "JBL Tour One M2 — Preto",
         "sku": "JBL-TOUR-PT-G",
@@ -168,6 +169,7 @@ SUPPORT_ORDERS = [
     },
     {
         "order_id": "PED-1002",
+        "owner_user_key": "cliente-demo",
         "customer_name": "Marina Lopes",
         "product_name": "JBL Tour One M2 — Prata",
         "sku": "JBL-TOUR-PR-G",
@@ -183,6 +185,7 @@ SUPPORT_ORDERS = [
     },
     {
         "order_id": "PED-1003",
+        "owner_user_key": "cliente-demo",
         "customer_name": "Carlos Menezes",
         "product_name": "JBL Tour One M2 — Verde",
         "sku": "JBL-TOUR-VD-G",
@@ -198,6 +201,7 @@ SUPPORT_ORDERS = [
     },
     {
         "order_id": "PED-1004",
+        "owner_user_key": "cliente-demo",
         "customer_name": "Beatriz Antunes",
         "product_name": "JBL Tour One M2 — Laranja",
         "sku": "JBL-TOUR-LR-G",
@@ -278,9 +282,10 @@ GUARDRAIL_POLICY = {
     # voyage-4 autoEmbed band (~0.5036 benign → ~0.5078 forbidden) — medida com
     # backend/calibrate_thresholds.py. Live-editable.
     "denylist_threshold": 0.505,
-    # Se a camada semântica cair (índice ausente/mongot fora): "open" = segue só
-    # com regex (default, demo nunca trava); "closed" = bloqueia (área crítica).
-    "semantic_fail_mode": "open",
+    # Se a camada semântica cair (índice ausente/mongot fora): "closed" = bloqueia
+    # via regex apenas até o índice voltar. Fail-closed em toda área — ADR-001
+    # risco 3: fail-open deixava a área default degradar silenciosamente.
+    "semantic_fail_mode": "closed",
     "block_message": (
         "Desculpe, não posso ajudar com esse pedido — ele contraria as políticas "
         "de uso e segurança."
@@ -381,9 +386,14 @@ def _vector_index_definition(path: str, filters: list[str] | None = None) -> dic
 
     Mirrors the produtos_vector index definition (type "autoEmbed", modality
     "text", model "voyage-4"), plus `filter` fields for native pre-filtering.
+
+    indexingMethod "flat": ADR-001 risco 1 — poucos tenants, <10k vetores por
+    área/usuário, filtro já seletivo. Flat evita overhead de grafo HNSW e dá
+    latência mais previsível (sem noisy-neighbor entre áreas/usuários) nesse
+    volume. Reavaliar para HNSW se algum tenant ultrapassar ~10k vetores.
     """
     fields = [{"type": "autoEmbed", "modality": "text",
-               "model": "voyage-4", "path": path}]
+               "model": "voyage-4", "path": path, "indexingMethod": "flat"}]
     fields += [{"type": "filter", "path": f} for f in (filters or [])]
     return {"fields": fields}
 
@@ -588,8 +598,13 @@ def main():
     poc["agent_memory"].create_index([("user_key", 1), ("active", 1), ("fact_norm", 1)])
     poc["agent_traces"].create_index([("conversation_id", 1), ("at", -1)])
     poc["app_users"].create_index("user_key", unique=True)
+    # order_id único: a query quente do agente nunca faz collection scan (o
+    # filtro com owner_user_key já chega seletivo por este índice)
+    poc["support_orders"].create_index("order_id", unique=True)
+    # fila de near-misses do guardrail: consultada por status, ordenada por at
+    poc["guardrail_candidates"].create_index([("status", 1), ("at", -1)])
     print("Índices regulares: agent_sessions (único), agent_memory, agent_traces, "
-          "app_users")
+          "app_users, support_orders, guardrail_candidates")
 
     print("Seed concluído em ai_brain:")
     for coll in ("prompt_templates", "model_config", "cache_config",
@@ -610,14 +625,24 @@ def main():
     #    30 dias — as collections de observabilidade não crescem para sempre.
     poc["semantic_cache"].create_index("expires_at", expireAfterSeconds=0)
     AUDIT_TTL_DAYS = 30
-    for coll_name in ("guardrail_events", "agent_traces"):
+    for coll_name in ("guardrail_events", "agent_traces", "guardrail_candidates",
+                      "admin_audit"):
         try:  # índice antigo em `at` (sem TTL) fica redundante — remove
             poc[coll_name].drop_index("at_-1")
         except Exception:  # noqa: BLE001 — não existia
             pass
-        poc[coll_name].create_index("at", expireAfterSeconds=AUDIT_TTL_DAYS * 24 * 3600)
-    print("\nTTL: semantic_cache.expires_at (runtime) · guardrail_events.at e "
-          f"agent_traces.at ({AUDIT_TTL_DAYS} dias)")
+        try:
+            poc[coll_name].create_index("at", name="ttl_at_30d",
+                                        expireAfterSeconds=AUDIT_TTL_DAYS * 24 * 3600)
+        except Exception as exc:  # noqa: BLE001 — TTL antigo com outro nome
+            print(f"  ⚠ TTL em {coll_name}.at não recriado: {str(exc)[:120]}")
+    # memória de curto prazo: sessão sem novo turno em 1h expira sozinha (ADR-002)
+    SESSION_IDLE_SECONDS = 3600
+    poc["agent_sessions"].create_index("updated_at", name="ttl_updated_at_1h",
+                                       expireAfterSeconds=SESSION_IDLE_SECONDS)
+    print("\nTTL: semantic_cache.expires_at (runtime) · guardrail_events.at, "
+          f"agent_traces.at e guardrail_candidates.at ({AUDIT_TTL_DAYS} dias) · "
+          f"agent_sessions.updated_at ({SESSION_IDLE_SECONDS // 60} min de inatividade)")
 
     print("\nÍndices vetoriais (autoEmbed voyage-4):")
     create_vector_indexes(client)

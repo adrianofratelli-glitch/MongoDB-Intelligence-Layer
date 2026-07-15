@@ -17,7 +17,7 @@ import re
 import time
 from datetime import datetime, timezone
 
-from anthropic import AsyncAnthropic
+from anthropic import APIConnectionError, APIError, APIStatusError, AsyncAnthropic
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -49,15 +49,57 @@ CHARS_PER_TOKEN_ESTIMATE = 4
 # Um único client HTTP para todos os turnos (pool de conexões reutilizado)
 anthropic_client = AsyncAnthropic()
 
+LLM_RETRIES = 2            # novas tentativas no MESMO modelo antes do fallback
+LLM_BACKOFF_SECONDS = 1.0  # backoff exponencial: 1s, 2s
+# Deadline do turno inteiro (loop + tools): MCP travado não segura a request
+# para sempre. Budget de tokens: MAX_ITERS limita rounds, isto limita CUSTO.
+AGENT_TURN_TIMEOUT_SECONDS = float(os.getenv("AGENT_TURN_TIMEOUT_SECONDS", "120"))
+AGENT_MAX_TURN_TOKENS = int(os.getenv("AGENT_MAX_TURN_TOKENS", "60000"))
 
-async def _resolve_agent_model() -> str:
-    """The agent runs on the ACTIVE primary model from ai_brain.model_config, so the
+
+async def _create_with_retry(client, *, model: str, fallback_model: str | None = None,
+                             **kwargs):
+    """messages.create com retry exponencial e fallback de modelo.
+
+    Erro transitório da API (rede, 5xx, rate limit) não pode derrubar o turno
+    inteiro do agente: tenta de novo com backoff e, esgotado o primário, tenta
+    uma vez o modelo de fallback do model_config antes de propagar. Erro
+    NÃO-transitório (400/401/403: request inválida, chave errada) propaga na
+    hora — repetir não muda o resultado, só soma latência.
+    """
+    def _transient(exc: APIError) -> bool:
+        if isinstance(exc, APIConnectionError):
+            return True
+        if isinstance(exc, APIStatusError):
+            return exc.status_code == 429 or exc.status_code >= 500
+        return False
+
+    last_exc: Exception | None = None
+    for attempt in range(LLM_RETRIES + 1):
+        try:
+            return await client.messages.create(model=model, **kwargs)
+        except APIError as exc:
+            if not _transient(exc):
+                raise
+            last_exc = exc
+            if attempt < LLM_RETRIES:
+                await asyncio.sleep(LLM_BACKOFF_SECONDS * (2 ** attempt))
+    if fallback_model and fallback_model != model:
+        try:
+            return await client.messages.create(model=fallback_model, **kwargs)
+        except APIError as exc:
+            last_exc = exc
+    raise last_exc
+
+
+async def _resolve_agent_model(area: str = "default") -> tuple[str, str | None]:
+    """(primary, fallback) do ai_brain.model_config ATIVO da área, so the
     Model Swap tab controls the agent's speed/cost live (Sonnet ↔ Haiku, no deploy)."""
     try:
-        cfg = await get_active_config()
-        return cfg["primary"]["model"]
+        cfg = await get_active_config(area)
+        return cfg["primary"]["model"], (cfg.get("fallback") or {}).get("model")
     except Exception:  # noqa: BLE001 — never let config break a run
-        return AGENT_MODEL
+        return AGENT_MODEL, None
 
 # Curated tool allowlist — read tools + a single scoped write (update-many).
 # Keeps the loop tight and the demo predictable; no delete/drop reachable.
@@ -90,7 +132,8 @@ def _specific_order_id(tool_input: dict) -> str | None:
     return None
 
 
-def _write_denial(tool_name: str, target: str, tool_input: dict) -> str | None:
+def _write_denial(tool_name: str, target: str, tool_input: dict,
+                  user_key: str) -> str | None:
     """Política de escrita do app. Retorna a mensagem de negação, ou None se ok."""
     if target not in WRITE_SCOPE:
         return (f"Escrita negada pela política do app: {tool_name} só é permitido "
@@ -106,9 +149,16 @@ def _write_denial(tool_name: str, target: str, tool_input: dict) -> str | None:
     if status not in ALLOWED_ORDER_STATUSES:
         return ("Escrita negada pela política do app: o agente só pode alterar o status "
                 "para um estado de atendimento aprovado.")
-    # Rewrite instead of merely validating: extra operators/fields never reach MCP.
-    tool_input["filter"] = {WRITE_FILTER_REQUIRED_FIELD: order_id}
-    tool_input["update"] = {"$set": {"status": status}}
+    # Rebuild instead of merely validating: extra operators/fields/options
+    # (ex.: upsert) never reach MCP. owner_user_key no filtro: o agente só
+    # altera pedido do PRÓPRIO usuário do turno — isolamento também na escrita.
+    database, collection = tool_input.get("database"), tool_input.get("collection")
+    tool_input.clear()
+    tool_input.update({
+        "database": database, "collection": collection,
+        "filter": {WRITE_FILTER_REQUIRED_FIELD: order_id, "owner_user_key": user_key},
+        "update": {"$set": {"status": status}},
+    })
     return None
 
 
@@ -121,8 +171,16 @@ def _read_denial(tool_name: str, target: str, tool_input: dict,
             if order_id is None:
                 return "Leitura negada: pedidos exigem filtro por order_id específico."
             # The agent never needs the customer's identity to service an order.
-            tool_input["filter"] = {"order_id": order_id}
-            tool_input["projection"] = ORDER_FIELDS_FOR_AGENT
+            # owner_user_key no filtro: pedido de OUTRO usuário simplesmente não
+            # existe para este agente — a query volta vazia, sem vazar existência.
+            # Rebuild: nenhuma opção extra (sort/limit/collation) sobrevive.
+            database, collection = tool_input.get("database"), tool_input.get("collection")
+            tool_input.clear()
+            tool_input.update({
+                "database": database, "collection": collection,
+                "filter": {"order_id": order_id, "owner_user_key": user_key},
+                "projection": ORDER_FIELDS_FOR_AGENT,
+            })
             return None
         if target == "POC.agent_sessions":
             requested = tool_input.get("filter")
@@ -385,21 +443,29 @@ def _memory_note(conversation_id: str) -> str:
     )
 
 
-async def _run_tool_loop(session, tools, system, user_msg, emit, metrics, model,
+async def _run_tool_loop(session, tools, system_static, system_dynamic, user_msg,
+                         emit, metrics, model,
                          conversation_id: str, user_key: str,
-                         history: list[dict] | None = None) -> str:
+                         history: list[dict] | None = None,
+                         fallback_model: str | None = None) -> str:
     """The core Claude ↔ MongoDB MCP tool-use loop. Returns the final answer text.
 
     `history` são os turnos recentes vindos de POC.agent_sessions (memória curta
     hidratada no contexto — padrão híbrido).
 
-    Latency: the system prompt and the (large) tool schemas are static across the
-    loop's iterations, so we mark them with cache_control. From the 2nd iteration
-    on, Anthropic serves them from the prompt cache — faster time-to-first-token
-    and cheaper input tokens on every follow-up round.
+    Latency/custo: o system é DOIS blocos. O estático (persona da área + regras)
+    tem cache_control e sobrevive entre TURNOS e CONVERSAS da mesma área; o
+    dinâmico (nota da conversa + fatos de memória do turno) tem cache_control
+    próprio e é reaproveitado entre as iterações DESTE turno. Antes era um bloco
+    único: qualquer fato novo invalidava o cache inteiro a cada turno.
     """
     client = anthropic_client
-    system_blocks = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    system_blocks = [
+        {"type": "text", "text": system_static, "cache_control": {"type": "ephemeral"}},
+    ]
+    if system_dynamic:
+        system_blocks.append({"type": "text", "text": system_dynamic,
+                              "cache_control": {"type": "ephemeral"}})
     cached_tools = list(tools)
     if cached_tools:  # cache the whole tool-definitions block via the last entry
         cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
@@ -409,8 +475,10 @@ async def _run_tool_loop(session, tools, system, user_msg, emit, metrics, model,
 
     for _ in range(MAX_ITERS):
         t0 = time.perf_counter()
-        resp = await client.messages.create(
+        resp = await _create_with_retry(
+            client,
             model=model,
+            fallback_model=fallback_model,
             max_tokens=1000,
             system=system_blocks,
             tools=cached_tools,
@@ -433,6 +501,21 @@ async def _run_tool_loop(session, tools, system, user_msg, emit, metrics, model,
             final_answer = reasoning
             break
 
+        # Budget de custo do turno: estourou o teto de tokens → encerra com o
+        # que já tem, em vez de seguir queimando rounds até MAX_ITERS.
+        spent = (metrics["input_tokens"] + metrics["output_tokens"]
+                 + metrics["cache_read_input_tokens"]
+                 + metrics["cache_creation_input_tokens"])
+        if spent >= AGENT_MAX_TURN_TOKENS:
+            emit("loop", "message", actor="agent",
+                 text=f"Budget de tokens do turno atingido ({spent} ≥ "
+                      f"{AGENT_MAX_TURN_TOKENS}) — encerrando o loop.")
+            final_answer = reasoning or (
+                "Não consegui concluir a operação dentro do limite deste turno. "
+                "Pode reformular ou dividir o pedido?"
+            )
+            break
+
         messages.append({"role": "assistant", "content": resp.content})
         tool_results = []
         for tu in tool_uses:
@@ -441,7 +524,7 @@ async def _run_tool_loop(session, tools, system, user_msg, emit, metrics, model,
             tt0 = time.perf_counter()
             tool_input = dict(tu.input)
             target = f'{tool_input.get("database", "?")}.{tool_input.get("collection", "?")}'
-            denial = (_write_denial(tu.name, target, tool_input) if is_write
+            denial = (_write_denial(tu.name, target, tool_input, user_key) if is_write
                       else _read_denial(tu.name, target, tool_input, conversation_id, user_key))
             if denial:
                 # escrita fora da política (collection ou filtro amplo): negada
@@ -601,8 +684,6 @@ async def run_agent(
             "estimated_chars_per_token": CHARS_PER_TOKEN_ESTIMATE,
         },
     }
-    agent_model = await _resolve_agent_model()  # live from model_config (Model Swap tab)
-
     def emit(phase, kind, **fields):
         trace.append({"phase": phase, "kind": kind, **fields})
 
@@ -611,6 +692,8 @@ async def run_agent(
     # system prompt, guardrail policy, cache scope. Both are document reads.
     user = await profiles.require_demo_user(user_key)
     area = user.get("area", profiles.DEFAULT_AREA)
+    # live from model_config (Model Swap tab), scoped to the user's area (C4)
+    agent_model, agent_fallback_model = await _resolve_agent_model(area)
     area_profile = await profiles.get_area_profile(area)
     metrics["reads"] += 2  # app_users + area_profiles
     profile_info = {"area": area, "label": area_profile.get("label", area),
@@ -679,7 +762,13 @@ async def run_agent(
     # ---- Long-term memory: only the facts RELEVANT to this turn ---------------
     # $vectorSearch pré-filtrado (user_key + active são campos de filtro do índice):
     # a memória não é despejada inteira no prompt — é uma QUERY pela pergunta.
-    ltm = await memory.load_relevant(user_key, user_msg)
+    # LATÊNCIA: memória longa, histórico curto e lista de tools são independentes
+    # entre si — rodam em PARALELO em vez de somar três round-trips sequenciais.
+    ltm, history, tools = await asyncio.gather(
+        memory.load_relevant(user_key, user_msg),
+        _load_recent_history(conversation_id, user_key),
+        list_agent_tools(session),
+    )
     metrics["reads"] += 1
     if ltm.get("facts"):
         mode = ltm.get("mode")
@@ -713,7 +802,7 @@ async def run_agent(
     # Padrão híbrido: janela recente em contexto (referências implícitas como
     # "e o outro pedido?" funcionam) + find em agent_sessions para o histórico
     # completo (a consolidação continua sendo uma query visível no MongoDB).
-    history = await _load_recent_history(conversation_id, user_key)
+    # (carregado em paralelo acima, junto com a memória longa e as tools)
     if history:
         metrics["reads"] += 1
         emit("retrieve", "tool_call", actor="mongodb", tool="find (agent_sessions)",
@@ -723,19 +812,31 @@ async def run_agent(
              result=f"Memória curta: últimos {len(history)} turno(s) hidratados no contexto.",
              reads=metrics["reads"], writes=metrics["writes"])
 
-    tools = await list_agent_tools(session)
     persona = (area_profile.get("persona") or "").strip()
     persona_block = (
         f"\n\nRegras da área \"{profile_info['label']}\" (carregadas de "
         f"ai_brain.area_profiles):\n{persona}" if persona else ""
     )
-    system = SYSTEM + persona_block + _memory_note(conversation_id) + memory.format_for_prompt(ltm)
+    # Estático (cacheável entre turnos/conversas da área) vs dinâmico (por turno)
+    system_static = SYSTEM + persona_block
+    system_dynamic = _memory_note(conversation_id) + memory.format_for_prompt(ltm)
 
     # ---- Agent tool-use loop --------------------------------------------------
-    final_answer = await _run_tool_loop(
-        session, tools, system, user_msg, emit, metrics, agent_model,
-        conversation_id, user_key, history=history,
-    )
+    try:
+        final_answer = await asyncio.wait_for(
+            _run_tool_loop(
+                session, tools, system_static, system_dynamic, user_msg, emit,
+                metrics, agent_model,
+                conversation_id, user_key, history=history,
+                fallback_model=agent_fallback_model,
+            ),
+            timeout=AGENT_TURN_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        emit("loop", "message", actor="agent",
+             text=f"Deadline do turno ({AGENT_TURN_TIMEOUT_SECONDS:.0f}s) atingido.")
+        final_answer = ("A operação demorou mais que o esperado e foi interrompida. "
+                        "Tente novamente em instantes.")
 
     # ---- Guardrail (output): redact PII before it reaches the user ------------
     guard_out = await guardrails.check_output(final_answer, user_key, conversation_id, area)
