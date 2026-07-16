@@ -36,6 +36,13 @@ AGENT_MODEL = "claude-sonnet-4-5"  # default/fallback if model_config is unreada
 MAX_ITERS = 6  # safety cap on tool-use rounds
 MAX_SESSION_TURNS = 200   # $slice no $push: turns[] nunca cresce sem limite
 HISTORY_TURNS = 6         # janela recente hidratada no contexto do loop (3 trocas)
+# Turnos mais antigos que a janela recente não são descartados nem despejados
+# crus no prompt — a partir deste tamanho de sessão passam por UM resumo (Haiku)
+# em vez de corte por caractere. Alinhado à recomendação de "context summarization"
+# de arquiteturas de referência (GCP) para não estourar a janela em sessões longas.
+SUMMARY_TRIGGER_TURNS = 12
+SUMMARY_MODEL = "claude-haiku-4-5"
+MAX_SUMMARY_CHARS = 600
 MAX_USER_MESSAGE_CHARS = 4_000
 MAX_HISTORY_CHARS = 6_000
 MAX_TOOL_RESULT_CHARS = 1_500
@@ -682,32 +689,84 @@ async def _store_short_term(conversation_id, user_key, user_msg, final_answer,
     return turn_count
 
 
-async def _load_recent_history(conversation_id: str, user_key: str) -> list[dict]:
+async def _summarize_older_turns(conversation_id: str, older_turns: list[dict]) -> str | None:
+    """Condensa turnos fora da janela recente num resumo curto (1 chamada Haiku).
+
+    Só roda quando a sessão cruza SUMMARY_TRIGGER_TURNS e o resumo salvo já
+    ficou defasado — não é chamado a cada turno. O resumo substitui o corte
+    bruto por caractere para o contexto ANTIGO; a janela recente continua
+    hidratada literalmente (referências implícitas seguem funcionando).
+    """
+    if not older_turns:
+        return None
+    transcript = "\n".join(
+        f"{'Cliente' if t['role'] == 'user' else 'Agente'}: {t['content']}"
+        for t in older_turns
+    )[:8_000]
+    try:
+        resp = await anthropic_client.messages.create(
+            model=SUMMARY_MODEL,
+            max_tokens=250,
+            system=(
+                "Resuma esta parte ANTIGA de uma conversa de atendimento em até "
+                "3 frases, em português, mantendo fatos concretos (pedidos, "
+                "valores, decisões) e omitindo saudações. Não invente nada."
+            ),
+            messages=[{"role": "user", "content": transcript}],
+        )
+        text = next((b.text for b in resp.content if b.type == "text"), "")
+        return text.strip()[:MAX_SUMMARY_CHARS] or None
+    except Exception:  # noqa: BLE001 — resumo é otimização; falha nunca derruba o turno
+        logger.exception("resumo de histórico falhou (conversation_id=%s)", conversation_id)
+        return None
+
+
+async def _load_recent_history(conversation_id: str, user_key: str) -> tuple[list[dict], str | None]:
     """Últimos turnos da conversa, para hidratar o contexto do loop (padrão
-    híbrido: janela recente em contexto + find para o histórico completo)."""
+    híbrido: janela recente em contexto + find para o histórico completo).
+
+    Turnos além da janela recente não são apenas cortados: a partir de
+    SUMMARY_TRIGGER_TURNS eles viram um resumo (ver _summarize_older_turns),
+    cacheado no próprio documento da sessão até novos turnos antigos surgirem.
+    """
     doc = await poc()["agent_sessions"].find_one(
         {"session_id": conversation_id, "user_key": user_key},
-        {"turns": {"$slice": -HISTORY_TURNS}},
         max_time_ms=MAX_TIME_MS,
     )
     if not doc:
-        return []
-    turns = [
+        return [], None
+    all_turns = [
         {"role": t["role"], "content": t["content"]}
         for t in doc.get("turns", [])
         if t.get("role") in ("user", "assistant") and t.get("content")
     ]
+    older = all_turns[:-HISTORY_TURNS] if len(all_turns) > HISTORY_TURNS else []
+    turns = all_turns[-HISTORY_TURNS:]
+
+    summary = None
+    summary_covers = doc.get("history_summary_covers", 0)
+    if len(all_turns) >= SUMMARY_TRIGGER_TURNS and len(older) > summary_covers:
+        summary = await _summarize_older_turns(conversation_id, older)
+        if summary:
+            await poc()["agent_sessions"].update_one(
+                {"session_id": conversation_id, "user_key": user_key},
+                {"$set": {"history_summary": summary,
+                          "history_summary_covers": len(older)}},
+            )
+    elif summary_covers and doc.get("history_summary"):
+        summary = doc["history_summary"]  # já cacheado, nada novo pra resumir
+
     # Keep the newest context that fits the deterministic budget, then restore
     # chronological order so the conversation remains coherent.
     selected: list[dict] = []
     used = 0
-    for turn in reversed(turns[-HISTORY_TURNS:]):
+    for turn in reversed(turns):
         size = len(turn["content"])
         if selected and used + size > MAX_HISTORY_CHARS:
             break
         selected.append({**turn, "content": turn["content"][:MAX_HISTORY_CHARS - used]})
         used += min(size, MAX_HISTORY_CHARS - used)
-    return list(reversed(selected))
+    return list(reversed(selected)), summary
 
 
 async def run_agent(
@@ -842,7 +901,7 @@ async def run_agent(
     # a memória não é despejada inteira no prompt — é uma QUERY pela pergunta.
     # LATÊNCIA: memória longa, histórico curto e lista de tools são independentes
     # entre si — rodam em PARALELO em vez de somar três round-trips sequenciais.
-    ltm, history, tools = await asyncio.gather(
+    ltm, (history, history_summary), tools = await asyncio.gather(
         memory.load_relevant(user_key, user_msg),
         _load_recent_history(conversation_id, user_key),
         list_agent_tools(session),
@@ -894,15 +953,25 @@ async def run_agent(
                    "projection": {"turns": {"$slice": -HISTORY_TURNS}}},
              result=f"Memória curta: últimos {len(history)} turno(s) hidratados no contexto.",
              reads=metrics["reads"], writes=metrics["writes"])
+    if history_summary:
+        emit("retrieve", "message", actor="agent",
+             text="Turnos mais antigos desta sessão foram resumidos (Haiku) "
+                  "em vez de descartados/cortados crus — contexto extra sem "
+                  "estourar o budget.")
 
     persona = (area_profile.get("persona") or "").strip()
     persona_block = (
         f"\n\nRegras da área \"{profile_info['label']}\" (carregadas de "
         f"ai_brain.area_profiles):\n{persona}" if persona else ""
     )
+    summary_block = (
+        f"\n\nResumo do início desta conversa (turnos mais antigos, já fora da "
+        f"janela recente): {history_summary}" if history_summary else ""
+    )
     # Estático (cacheável entre turnos/conversas da área) vs dinâmico (por turno)
     system_static = SYSTEM + persona_block
-    system_dynamic = _memory_note(conversation_id) + memory.format_for_prompt(ltm)
+    system_dynamic = (_memory_note(conversation_id) + memory.format_for_prompt(ltm)
+                      + summary_block)
 
     # ---- Agent tool-use loop --------------------------------------------------
     try:

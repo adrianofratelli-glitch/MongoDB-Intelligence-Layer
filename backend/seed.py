@@ -355,6 +355,12 @@ AREA_PROFILES = [
         "area": "default",
         "label": "Suporte E-commerce",
         "active": True,
+        # tier vira claim própria no JWT (auth.issue_token) e escala o rate
+        # limit por área — dimensão de "request context" separada da área em
+        # si, alinhada a como referências de arquitetura multi-tenant separam
+        # security/tenant/request context no token em vez de um único claim.
+        "tier": "standard",
+        "rate_limit_multiplier": 1.0,
         "persona": (
             "Você atende a área de SUPORTE do e-commerce. Tom cordial e objetivo. "
             "Siga as políticas padrão: troca em até 30 dias, reembolso em até 7 "
@@ -367,6 +373,10 @@ AREA_PROFILES = [
         "area": "financeiro",
         "label": "Financeiro",
         "active": True,
+        # Área crítica: tier "priority" dá 2x o rate limit padrão (picos de
+        # conciliação/fechamento não devem esbarrar no limite genérico).
+        "tier": "priority",
+        "rate_limit_multiplier": 2.0,
         "persona": (
             "Você atende a área FINANCEIRA (faturas, cobranças, estornos). Regras "
             "de negócio da área: 1) NUNCA negocie descontos ou condições fora do "
@@ -381,6 +391,8 @@ AREA_PROFILES = [
         "area": "logistica",
         "label": "Logística",
         "active": True,
+        "tier": "standard",
+        "rate_limit_multiplier": 1.0,
         "persona": (
             "Você atende a área de LOGÍSTICA (rastreio, transportadoras, prazos "
             "de entrega). Regras de negócio: 1) Cite sempre o último evento da "
@@ -396,6 +408,8 @@ AREA_PROFILES = [
         "area": "vendas",
         "label": "Vendas",
         "active": True,
+        "tier": "standard",
+        "rate_limit_multiplier": 1.0,
         "persona": (
             "Você atende a área de VENDAS (pré-venda, disponibilidade, "
             "recomendações de produto). Regras de negócio: 1) Recomende no "

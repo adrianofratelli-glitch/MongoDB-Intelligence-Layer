@@ -42,12 +42,23 @@ else:
     )
 
 
-def issue_token(user_key: str, area: str, name: str = "") -> dict:
-    """Assina um JWT para uma identidade demo JÁ VALIDADA em app_users."""
+def issue_token(user_key: str, area: str, name: str = "", tier: str = "standard",
+                rate_limit_multiplier: float = 1.0) -> dict:
+    """Assina um JWT para uma identidade demo JÁ VALIDADA em app_users.
+
+    `tier`/`rate_limit_multiplier` vêm de area_profiles (documento, editável
+    por update_one) e são gravados como claims próprias — dimensão de "request
+    context" separada de `area`/`sub`, no espírito de tokens que carregam
+    security+tenant+request context como campos distintos. O valor é uma FOTO
+    do momento da emissão: mudar o multiplicador no banco só afeta tokens
+    emitidos depois (o TTL curto do token é o mecanismo de propagação, não uma
+    query por request).
+    """
     now = datetime.now(timezone.utc)
     exp = now + timedelta(hours=JWT_TTL_HOURS)
     token = jwt.encode(
-        {"sub": user_key, "area": area, "name": name,
+        {"sub": user_key, "area": area, "tier": tier,
+         "rate_limit_multiplier": rate_limit_multiplier, "name": name,
          "iat": int(now.timestamp()), "exp": int(exp.timestamp()),
          "iss": "intelligence-layer-poc"},
         JWT_SECRET, algorithm=_ALGO,
@@ -75,3 +86,26 @@ def resolve_user_key(request: Request, fallback: str | None) -> str | None:
     if AUTH_REQUIRED:
         raise HTTPException(status_code=401, detail="Bearer token obrigatório.")
     return fallback
+
+
+def _decode_claims(request: Request) -> dict:
+    header = request.headers.get("authorization", "")
+    if not header.lower().startswith("bearer "):
+        return {}
+    try:
+        return jwt.decode(header[7:].strip(), JWT_SECRET, algorithms=[_ALGO],
+                          issuer="intelligence-layer-poc")
+    except jwt.InvalidTokenError:
+        return {}
+
+
+def resolve_tier(request: Request, fallback: str = "standard") -> str:
+    """Claim `tier` do Bearer token, sem round-trip ao banco."""
+    return _decode_claims(request).get("tier") or fallback
+
+
+def resolve_rate_limit_multiplier(request: Request, fallback: float = 1.0) -> float:
+    """Claim `rate_limit_multiplier` do Bearer token — diferencia o limite por
+    tier direto do token assinado, sem nova query por request."""
+    value = _decode_claims(request).get("rate_limit_multiplier")
+    return float(value) if isinstance(value, (int, float)) else fallback

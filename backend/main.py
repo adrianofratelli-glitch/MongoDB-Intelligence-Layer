@@ -175,7 +175,11 @@ async def admin_audit(action: str, request: Request, **details) -> None:
         logger.exception("falha ao gravar admin_audit (best-effort)")
 
 
-def enforce_rate_limit(identity: str) -> None:
+def enforce_rate_limit(identity: str, multiplier: float = 1.0) -> None:
+    """`multiplier` vem da claim de tier do token (área com tier "priority"
+    ganha mais requisições/minuto sem tocar código — é dado de area_profiles,
+    não uma constante por área espalhada aqui)."""
+    limit = max(1, round(RATE_LIMIT_PER_MINUTE * multiplier))
     now = time.monotonic()
     for key in [k for k, w in _rate_windows.items() if k != identity]:
         window = _rate_windows[key]
@@ -186,10 +190,10 @@ def enforce_rate_limit(identity: str) -> None:
     window = _rate_windows[identity]
     while window and now - window[0] > 60:
         window.popleft()
-    if len(window) >= RATE_LIMIT_PER_MINUTE:
+    if len(window) >= limit:
         raise HTTPException(
             status_code=429,
-            detail=f"Limite de {RATE_LIMIT_PER_MINUTE} requisições/minuto atingido "
+            detail=f"Limite de {limit} requisições/minuto atingido "
                    "para esta identidade. Aguarde e tente novamente.",
         )
     window.append(now)
@@ -411,8 +415,13 @@ async def auth_token(body: TokenBody):
     """Troca uma identidade demo cadastrada por um JWT. O switcher do frontend
     é o 'login' da demo; produção substitui esta emissão por OIDC/JWKS."""
     user = await profiles.require_demo_user(body.user_key)
-    return auth.issue_token(user["user_key"], user.get("area", "default"),
-                            user.get("name", ""))
+    area = user.get("area", profiles.DEFAULT_AREA)
+    area_profile = await profiles.get_area_profile(area)
+    return auth.issue_token(
+        user["user_key"], area, user.get("name", ""),
+        tier=area_profile.get("tier", "standard"),
+        rate_limit_multiplier=area_profile.get("rate_limit_multiplier", 1.0),
+    )
 
 
 # ---------- Tab 3: Agent (autonomous loop via MongoDB MCP Server) ----------
@@ -488,7 +497,8 @@ async def agent_run(request: Request, body: AgentRunBody):
     # uuid4: id de conversa não-adivinhável (timestamp em segundos colide entre
     # usuários e é enumerável)
     # IP compõe a chave: rotacionar user_key não escapa do limite
-    enforce_rate_limit(f"agent:{client_ip(request)}:{user_key}")
+    enforce_rate_limit(f"agent:{client_ip(request)}:{user_key}",
+                       multiplier=auth.resolve_rate_limit_multiplier(request))
     conversation_id = body.conversation_id or f"conv_{uuid4().hex[:16]}"
     try:
         result = await run_agent(
