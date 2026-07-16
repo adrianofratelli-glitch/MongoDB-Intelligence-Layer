@@ -25,6 +25,9 @@ from pymongo.errors import (
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 MAX_TIME_MS = 10_000
+# Shared with seed.py (creates the TTL index) and main.py (surfaces the
+# deadline to the inspector) so the two never drift apart.
+SESSION_IDLE_SECONDS = 3600
 
 _client: AsyncMongoClient | None = None
 

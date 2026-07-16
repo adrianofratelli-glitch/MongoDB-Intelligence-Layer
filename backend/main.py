@@ -19,7 +19,7 @@ import secrets
 import time
 from collections import defaultdict, deque
 from contextlib import AsyncExitStack, asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from bson import ObjectId
@@ -45,7 +45,7 @@ from agent import (
     mcp_server_params,
     run_agent,
 )
-from db import MAX_TIME_MS, SafeQueryError, ai_brain, get_client, poc, safe_query
+from db import MAX_TIME_MS, SESSION_IDLE_SECONDS, SafeQueryError, ai_brain, get_client, poc, safe_query
 from llm import call_with_fallback, get_active_config
 
 observability.setup_logging()
@@ -572,8 +572,15 @@ async def memory_short_inspect(conversation_id: str, user_key: str, request: Req
             {"session_id": conversation_id, "user_key": user_key}, max_time_ms=MAX_TIME_MS
         )
     )
-    return clean(doc or {"session_id": conversation_id, "turns": [],
-                         "collection": "POC.agent_sessions"})
+    if doc is None:
+        return clean({"session_id": conversation_id, "turns": [],
+                      "collection": "POC.agent_sessions"})
+    # TTL (ADR-002): a session's `updated_at` drives a MongoDB TTL index — no
+    # cron, no invalidation code. Surfaced here so the inspector shows it
+    # instead of looking like the session lives forever.
+    doc["ttl_expires_at"] = doc["updated_at"] + timedelta(seconds=SESSION_IDLE_SECONDS)
+    doc["ttl_idle_seconds"] = SESSION_IDLE_SECONDS
+    return clean(doc)
 
 
 @app.delete("/api/memory/{user_key}")

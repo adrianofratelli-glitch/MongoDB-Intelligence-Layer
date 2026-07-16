@@ -988,7 +988,13 @@ async def run_agent(
     # written to the shared cache. Personalized/transactional answers must not be
     # replayed to another user.
     if not used_business_tools and final_answer:
-        personalized = bool(new_facts) or bool(superseded) or bool(ltm.get("facts"))
+        # A durable-signal message (mem_task fired) counts as personalized even
+        # when extraction found nothing new or failed outright — otherwise a
+        # transient extractor error caches a name-bearing reply ("Olá, Marina!
+        # ficou salva...") as if it were generic, poisoning the shared cache for
+        # the whole area with a false "sua preferência foi salva" promise.
+        personalized = (bool(new_facts) or bool(superseded)
+                        or bool(ltm.get("facts")) or mem_task is not None)
         if not personalized:
             await cache.store(user_msg, final_answer, agent_model, area=area)
             metrics["writes"] += 1

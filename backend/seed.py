@@ -16,6 +16,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pymongo import MongoClient
 
+from db import SESSION_IDLE_SECONDS
+
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 NOW = datetime.now(timezone.utc)
@@ -839,7 +841,6 @@ def main():
         except Exception as exc:  # noqa: BLE001 — TTL antigo com outro nome
             print(f"  ⚠ TTL em {coll_name}.at não recriado: {str(exc)[:120]}")
     # memória de curto prazo: sessão sem novo turno em 1h expira sozinha (ADR-002)
-    SESSION_IDLE_SECONDS = 3600
     poc["agent_sessions"].create_index("updated_at", name="ttl_updated_at_1h",
                                        expireAfterSeconds=SESSION_IDLE_SECONDS)
     print("\nTTL: semantic_cache.expires_at (runtime) · guardrail_events.at, "

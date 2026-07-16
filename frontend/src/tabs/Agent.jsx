@@ -725,6 +725,7 @@ function MongoInspector({ userKey, area, conversationId, run }) {
         <div className="insp-body">
           <div className="dim mono insp-head">
             session_id: {data.short?.session_id ?? conversationId ?? '—'} · turnos desta conversa
+            {data.short?.ttl_expires_at && ` · expira ${short(data.short.ttl_expires_at, 19)} sem novo turno (TTL ${Math.round((data.short.ttl_idle_seconds ?? 0) / 60)} min)`}
           </div>
           {(data.short?.turns ?? []).length === 0 && (
             <div className="dim">Sem turnos ainda nesta conversa. "Nova conversa" zera esta memória.</div>

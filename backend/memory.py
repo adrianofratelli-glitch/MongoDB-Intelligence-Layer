@@ -289,7 +289,9 @@ _EXTRACT_SCHEMA = {
     "properties": {
         "facts": {
             "type": "array",
-            "maxItems": MAX_EXTRACTED_FACTS,
+            # maxItems on an array is NOT a supported json_schema keyword for
+            # structured output (the API 400s the whole call) — the cap is
+            # enforced below in Python instead, by truncating `candidates`.
             "items": {
                 "type": "object",
                 "properties": {
@@ -372,7 +374,7 @@ async def extract_and_store(user_key: str, user_message: str, session_id: str,
     raw = next((b.text for b in resp.content if b.type == "text"), "{}")
     usage = _extractor_usage(resp.usage)
     try:
-        candidates = json.loads(raw).get("facts", [])
+        candidates = json.loads(raw).get("facts", [])[:MAX_EXTRACTED_FACTS]
     except json.JSONDecodeError:
         candidates = []
 
