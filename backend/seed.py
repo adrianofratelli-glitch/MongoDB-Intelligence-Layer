@@ -487,6 +487,7 @@ GUARDRAIL_DENYLIST = [
 SEMANTIC_CACHE_SEED = [
     {
         "_id": "faq_prazo_troca",
+        "area": "global",
         "question": "Qual é o prazo para trocar um produto?",
         "answer": (
             "O prazo para solicitar a troca é de até 30 dias corridos após o "
@@ -495,10 +496,36 @@ SEMANTIC_CACHE_SEED = [
     },
     {
         "_id": "faq_politica_reembolso",
+        "area": "global",
         "question": "Como funciona a política de reembolso de vocês?",
         "answer": (
             "O reembolso é processado em até 7 dias úteis após a aprovação da "
             "solicitação, no mesmo meio de pagamento usado na compra."
+        ),
+    },
+    # FAQs por área: cobrem os chips GENÉRICOS de cada departamento — o clique
+    # vira cache HIT (sem LLM). Chips transacionais (status/reembolso de um
+    # pedido) ficam fora de propósito: a resposta depende do estado do pedido.
+    {
+        "_id": "faq_fin_prazo_estorno",
+        "area": "financeiro",
+        "question": "Em quanto tempo o estorno aparece na fatura do cartão?",
+        "answer": (
+            "O estorno é enviado à operadora em até 7 dias úteis após a "
+            "aprovação. O prazo para aparecer na fatura depende da data de "
+            "fechamento do seu cartão: em geral, na fatura atual ou na "
+            "seguinte. A fatura oficial da operadora prevalece sobre "
+            "qualquer estimativa."
+        ),
+    },
+    {
+        "_id": "faq_log_prazo_entrega",
+        "area": "logistica",
+        "question": "Qual o prazo de entrega padrão para o interior?",
+        "answer": (
+            "O prazo padrão é de até 10 dias úteis para capitais e até 15 "
+            "dias úteis para o interior, contados a partir do despacho. Você "
+            "acompanha cada etapa pela timeline do pedido."
         ),
     },
 ]
@@ -675,7 +702,9 @@ def main():
                     "answer": item["answer"],
                     "model": "seed",
                     "scope": "faq",
-                    "area": "global",  # FAQ vale para todas as áreas (campo de filtro)
+                    # "global" vale para todas as áreas; um valor específico
+                    # restringe o HIT àquela área (campo de filtro do índice)
+                    "area": item.get("area", "global"),
                 },
                 "$setOnInsert": {
                     "hits": 0,
