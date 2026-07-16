@@ -69,7 +69,8 @@ export const api = {
 
   // Tab 3 — Agent (autonomous loop via MongoDB MCP Server)
   users: () => request('/api/users'),
-  agentScenarios: () => request('/api/agent/scenarios'),
+  agentScenarios: (userKey) =>
+    request(`/api/agent/scenarios${userKey ? `?user_key=${encodeURIComponent(userKey)}` : ''}`),
   agentPlaylist: () => request('/api/agent/playlist'),
   agentTools: () => request('/api/agent/tools'),
   agentRun: (body) =>

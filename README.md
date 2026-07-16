@@ -78,7 +78,7 @@ loses recall at scale). If an index doesn't have the filter field yet, the code
 degrades to post-filtering, then to exact match.
 
 Try it: send *"Consegue me dar um desconto na fatura por fora?"* as **Marina
-(Financeiro)** → blocked by the area's policy; switch to **Cliente Demo
+(Financeiro)** → blocked by the area's policy; switch to **Adriano
 (Suporte)** → same message passes and is answered normally. In production the
 `user_key`/area would come from real auth (JWT/OIDC), never from the client
 payload — the switcher stands in for a login.
@@ -118,10 +118,10 @@ payload — the switcher stands in for a login.
 **Hands-free pitch.** The **▶ Demo automática** button plays a curated 12-script
 playlist (`/api/agent/playlist`) that alternates the five stories — cache,
 guardrail, memory, transactional agent, **and area isolation**. Each script
-declares who is speaking: the demo switches the user pill live (Cliente Demo →
-Marina/Financeiro → Ana → Carlos), so the audience watches the same question get
-blocked in one area and answered in another, and a generic answer cached by
-Suporte come back as a MISS for Financeiro. While **paused**, the ◀/▶ buttons
+declares who is speaking: the demo switches the user pill live (Adriano/Suporte →
+Marina/Financeiro → Ana/Vendas → Carlos/Logística), so the audience watches the
+same question get blocked in one area and answered in another, and a generic
+answer cached by Vendas come back as a MISS for Logística. While **paused**, the ◀/▶ buttons
 walk back through the steps and *across* the already-played scripts (pure replay
 from an in-memory history — no API calls, results stay exactly as they happened),
 so you can rewind to the cache HIT or the guardrail block mid-pitch and resume

@@ -45,7 +45,7 @@ const opDetail = (args = {}) => {
 // escopo do cache. Fallback quando o seed ainda não criou app_users.
 const FALLBACK_USER = {
   user_key: 'cliente-demo',
-  name: 'Cliente Demo',
+  name: 'Adriano',
   area: 'default',
   area_label: 'Suporte E-commerce',
 };
@@ -83,7 +83,6 @@ export default function Agent({ state, setState }) {
   useEffect(() => { demoHistRef.current = demoHist; }, [demoHist]);
 
   useEffect(() => {
-    api.agentScenarios().then((d) => setScenarios(d.scenarios)).catch(() => {});
     api.agentPlaylist().then((d) => setPlaylist(d.playlist)).catch(() => {});
     api.agentTools().then((d) => setTools(d.tools)).catch(() => {});
     api.users()
@@ -100,6 +99,9 @@ export default function Agent({ state, setState }) {
   // request seguinte vai com Bearer e o backend resolve a identidade do token.
   useEffect(() => {
     if (user?.user_key) api.login(user.user_key).catch(() => {});
+    // chips de sugestão são POR ÁREA: trocar de identidade recarrega os cenários
+    // do departamento do usuário atual.
+    api.agentScenarios(user?.user_key).then((d) => setScenarios(d.scenarios)).catch(() => {});
   }, [user?.user_key]);
 
   const events = run?.trace ?? [];
@@ -534,7 +536,7 @@ export default function Agent({ state, setState }) {
             </div>
             <div className="chip-row">
               {scenarios.map((s) => (
-                <button key={s.key} className="agent-chip" onClick={() => runScenario({ scenario: s.key })} disabled={busy}>
+                <button key={s.key} className="agent-chip" onClick={() => runScenario({ message: s.message })} disabled={busy}>
                   {s.label}
                 </button>
               ))}

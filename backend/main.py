@@ -38,8 +38,8 @@ import observability
 import profiles
 from agent import (
     DEFAULT_USER_KEY,
+    AREA_SCENARIOS,
     DEMO_PLAYLIST,
-    SCENARIOS,
     WRITE_TOOLS,
     list_agent_tools,
     mcp_server_params,
@@ -426,12 +426,21 @@ async def list_users():
 
 
 @app.get("/api/agent/scenarios")
-async def agent_scenarios():
+async def agent_scenarios(user_key: str | None = None):
+    """Sugestões de perguntas DA ÁREA do usuário — cada departamento vê chips
+    contextuais que referenciam os pedidos do próprio usuário. Sem user_key
+    (ou área sem entrada própria), cai na área default."""
+    area = profiles.DEFAULT_AREA
+    if user_key:
+        user = await profiles.get_user(user_key)
+        area = user.get("area", profiles.DEFAULT_AREA)
+    scenarios = AREA_SCENARIOS.get(area) or AREA_SCENARIOS["default"]
     return {
+        "area": area,
         "scenarios": [
             {"key": key, "label": s["label"], "message": s["message"]}
-            for key, s in SCENARIOS.items()
-        ]
+            for key, s in scenarios.items()
+        ],
     }
 
 

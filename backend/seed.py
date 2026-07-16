@@ -150,6 +150,11 @@ CACHE_CONFIG = {
 # the MongoDB MCP Server, searches produtos_vector for replacement options, and
 # writes status updates back — a real Perceive→Retrieve→Reason→Act→Store loop.
 # Each order maps to one suggestion chip. Re-seeding resets the statuses.
+# ISOLAMENTO: cada usuário tem pedidos PRÓPRIOS (owner_user_key). O agente só
+# enxerga pedidos do usuário do turno — consultar o pedido de outro usuário
+# retorna vazio, sem vazar nem a existência. Faixas de numeração por usuário:
+#   PED-1xxx cliente-demo (Adriano) · PED-2xxx marina.fin · PED-3xxx carlos.log
+#   PED-4xxx ana.vendas
 SUPPORT_ORDERS = [
     {
         "order_id": "PED-1001",
@@ -170,7 +175,7 @@ SUPPORT_ORDERS = [
     {
         "order_id": "PED-1002",
         "owner_user_key": "cliente-demo",
-        "customer_name": "Marina Lopes",
+        "customer_name": "Adriano Souza",
         "product_name": "JBL Tour One M2 — Prata",
         "sku": "JBL-TOUR-PR-G",
         "quantity": 1,
@@ -186,7 +191,7 @@ SUPPORT_ORDERS = [
     {
         "order_id": "PED-1003",
         "owner_user_key": "cliente-demo",
-        "customer_name": "Carlos Menezes",
+        "customer_name": "Adriano Souza",
         "product_name": "JBL Tour One M2 — Verde",
         "sku": "JBL-TOUR-VD-G",
         "quantity": 1,
@@ -202,7 +207,7 @@ SUPPORT_ORDERS = [
     {
         "order_id": "PED-1004",
         "owner_user_key": "cliente-demo",
-        "customer_name": "Beatriz Antunes",
+        "customer_name": "Adriano Souza",
         "product_name": "JBL Tour One M2 — Laranja",
         "sku": "JBL-TOUR-LR-G",
         "quantity": 1,
@@ -215,6 +220,105 @@ SUPPORT_ORDERS = [
             {"event": "entregue", "at": "2026-06-01T16:10:00Z"},
         ],
     },
+    # ---- marina.fin (Financeiro) ----
+    {
+        "order_id": "PED-2001",
+        "owner_user_key": "marina.fin",
+        "customer_name": "Marina Lopes",
+        "product_name": "Soundbar JBL Cinema SB510",
+        "sku": "JBL-SB510",
+        "quantity": 1,
+        "unit_price": 1899.00,
+        "status": "entregue",
+        "scenario": "reembolso",
+        "issue": None,
+        "timeline": [
+            {"event": "pedido_criado", "at": "2026-06-20T10:00:00Z"},
+            {"event": "entregue", "at": "2026-06-24T14:30:00Z"},
+        ],
+    },
+    {
+        "order_id": "PED-2002",
+        "owner_user_key": "marina.fin",
+        "customer_name": "Marina Lopes",
+        "product_name": "Caixa JBL Charge 5 — Azul",
+        "sku": "JBL-CHG5-AZ",
+        "quantity": 2,
+        "unit_price": 849.90,
+        "status": "entregue",
+        "scenario": "status",
+        "issue": None,
+        "timeline": [
+            {"event": "pedido_criado", "at": "2026-07-01T09:15:00Z"},
+            {"event": "entregue", "at": "2026-07-05T11:00:00Z"},
+        ],
+    },
+    # ---- carlos.log (Logística) ----
+    {
+        "order_id": "PED-3001",
+        "owner_user_key": "carlos.log",
+        "customer_name": "Carlos Menezes",
+        "product_name": "JBL Quantum 910 Wireless",
+        "sku": "JBL-Q910",
+        "quantity": 1,
+        "unit_price": 1499.00,
+        "status": "em_transito",
+        "scenario": "status",
+        "issue": None,
+        "timeline": [
+            {"event": "pedido_criado", "at": "2026-07-08T13:00:00Z"},
+            {"event": "despachado", "at": "2026-07-09T08:40:00Z"},
+        ],
+    },
+    {
+        "order_id": "PED-3002",
+        "owner_user_key": "carlos.log",
+        "customer_name": "Carlos Menezes",
+        "product_name": "JBL Flip 6 — Vermelho",
+        "sku": "JBL-FLIP6-VM",
+        "quantity": 1,
+        "unit_price": 599.90,
+        "status": "entregue",
+        "scenario": "pedido_danificado",
+        "issue": None,
+        "timeline": [
+            {"event": "pedido_criado", "at": "2026-06-25T16:20:00Z"},
+            {"event": "entregue", "at": "2026-06-30T10:05:00Z"},
+        ],
+    },
+    # ---- ana.vendas (Vendas) ----
+    {
+        "order_id": "PED-4001",
+        "owner_user_key": "ana.vendas",
+        "customer_name": "Ana Ribeiro",
+        "product_name": "JBL Live 770NC — Branco",
+        "sku": "JBL-L770-BR",
+        "quantity": 1,
+        "unit_price": 999.00,
+        "status": "entregue",
+        "scenario": "troca",
+        "issue": None,
+        "timeline": [
+            {"event": "pedido_criado", "at": "2026-06-15T11:45:00Z"},
+            {"event": "entregue", "at": "2026-06-19T15:00:00Z"},
+        ],
+    },
+    {
+        "order_id": "PED-4002",
+        "owner_user_key": "ana.vendas",
+        "customer_name": "Ana Ribeiro",
+        "product_name": "JBL Go 4 — Rosa",
+        "sku": "JBL-GO4-RS",
+        "quantity": 3,
+        "unit_price": 249.90,
+        "status": "em_transito",
+        "scenario": "status",
+        "issue": None,
+        "timeline": [
+            {"event": "pedido_criado", "at": "2026-07-10T09:30:00Z"},
+            {"event": "despachado", "at": "2026-07-11T07:50:00Z"},
+        ],
+    },
 ]
 
 
@@ -225,18 +329,20 @@ def _norm(text: str) -> str:
 # ---------- Usuários e perfis de área ----------
 # Identity → area: cada usuário pertence a uma área, e a área decide persona,
 # guardrails e escopo do cache. Memória (curta e longa) já é isolada por user_key.
+# 4 usuários, 4 ÁREAS DISTINTAS: cada troca de identidade muda persona,
+# guardrails, escopo do cache e memória — flexibilidade do agente por documento.
 APP_USERS = [
     {"_id": "user_cliente_demo", "user_key": "cliente-demo",
-     "name": "Cliente Demo", "area": "default"},
+     "name": "Adriano", "area": "default"},
     # Ana não acumula memória longa na demo — é dela que sai a resposta "limpa"
     # que demonstra o cache gravado por área (usuários com fatos na memória geram
     # respostas personalizadas, que nunca vão para o cache compartilhado).
-    {"_id": "user_ana_sup", "user_key": "ana.sup",
-     "name": "Ana", "area": "default"},
+    {"_id": "user_ana_vendas", "user_key": "ana.vendas",
+     "name": "Ana", "area": "vendas"},
     {"_id": "user_marina_fin", "user_key": "marina.fin",
      "name": "Marina", "area": "financeiro"},
-    {"_id": "user_carlos_fin", "user_key": "carlos.fin",
-     "name": "Carlos", "area": "financeiro"},
+    {"_id": "user_carlos_log", "user_key": "carlos.log",
+     "name": "Carlos", "area": "logistica"},
 ]
 
 # Perfil da área = persona/regras de negócio injetadas no system prompt do agente.
@@ -265,6 +371,36 @@ AREA_PROFILES = [
             "sistema oficial. 2) NUNCA dê conselhos de investimento nem projeções "
             "de rentabilidade. 3) Ao citar valores, deixe claro que a fatura "
             "oficial prevalece. Tom formal e preciso."
+        ),
+        "updated_at": NOW,
+    },
+    {
+        "_id": "area_logistica",
+        "area": "logistica",
+        "label": "Logística",
+        "active": True,
+        "persona": (
+            "Você atende a área de LOGÍSTICA (rastreio, transportadoras, prazos "
+            "de entrega). Regras de negócio: 1) Cite sempre o último evento da "
+            "timeline do pedido ao informar status. 2) Prazo padrão de entrega: "
+            "até 10 dias úteis capitais, até 15 dias úteis interior. 3) Extravio "
+            "só é declarado após 20 dias úteis sem movimentação. Tom direto e "
+            "informativo."
+        ),
+        "updated_at": NOW,
+    },
+    {
+        "_id": "area_vendas",
+        "area": "vendas",
+        "label": "Vendas",
+        "active": True,
+        "persona": (
+            "Você atende a área de VENDAS (pré-venda, disponibilidade, "
+            "recomendações de produto). Regras de negócio: 1) Recomende no "
+            "máximo 3 produtos por resposta, sempre com preço. 2) NUNCA prometa "
+            "desconto fora do preço de tabela do catálogo. 3) Se o cliente "
+            "pedir comparação, destaque diferenças objetivas (preço, "
+            "características). Tom consultivo e entusiasmado."
         ),
         "updated_at": NOW,
     },
@@ -504,10 +640,16 @@ def main():
     # support_orders lives in POC, next to the product catalog the agent searches
     poc = client["POC"]
 
-    # Usuários: identidade → área (o seletor de usuário do frontend lê daqui)
+    # Usuários: identidade → área (o seletor de usuário do frontend lê daqui).
+    # Remove identidades de seeds antigos (ex.: ana.sup/carlos.fin) para o
+    # seletor não exibir usuários órfãos.
+    poc["app_users"].delete_many({"_id": {"$nin": [u["_id"] for u in APP_USERS]}})
     for user in APP_USERS:
         poc["app_users"].replace_one({"_id": user["_id"]}, {**user, "updated_at": NOW},
                                      upsert=True)
+    # Pedidos: remove os que saíram do seed e regrava os atuais por order_id.
+    poc["support_orders"].delete_many(
+        {"order_id": {"$nin": [o["order_id"] for o in SUPPORT_ORDERS]}})
     for order in SUPPORT_ORDERS:
         order = {**order, "updated_at": NOW}
         poc["support_orders"].replace_one({"order_id": order["order_id"]}, order, upsert=True)
