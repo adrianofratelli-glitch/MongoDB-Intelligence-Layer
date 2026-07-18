@@ -10,9 +10,10 @@ import time
 
 from anthropic import APIError, AsyncAnthropic
 
+import observability
 from db import MAX_TIME_MS, SafeQueryError, ai_brain, safe_query
 
-client = AsyncAnthropic()  # reads ANTHROPIC_API_KEY from the environment
+client = AsyncAnthropic(default_headers={"api-key": os.getenv("ANTHROPIC_API_KEY", "")})  # reads ANTHROPIC_API_KEY from the environment
 
 # Micro-cache opcional do model_config. Default 0 = DESLIGADO: a regra da demo
 # ("o doc é lido a cada request, swap é instantâneo") continua valendo. Em
@@ -68,6 +69,11 @@ async def call_model(model_cfg: dict, system: str, messages: list[dict]) -> dict
     )
     latency_ms = int((time.perf_counter() - start) * 1000)
     text = next((b.text for b in resp.content if b.type == "text"), "")
+    # Alimenta o card "Economia" de /api/metrics: custo médio por chamada LLM
+    # é a base do cálculo de USD poupado por cache hit.
+    observability.metrics.bump("llm_calls")
+    observability.metrics.bump("llm_input_tokens", resp.usage.input_tokens)
+    observability.metrics.bump("llm_output_tokens", resp.usage.output_tokens)
     return {
         "text": text,
         "model": resp.model,

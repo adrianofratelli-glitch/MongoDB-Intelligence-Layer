@@ -842,6 +842,9 @@ def main():
     #  - guardrail_events / agent_traces: telemetria/auditoria da PoV expira em
     #    30 dias — as collections de observabilidade não crescem para sempre.
     poc["semantic_cache"].create_index("expires_at", expireAfterSeconds=0)
+    # Fallback exato do cache filtra por (question_norm, area) — sem este índice
+    # vira COLLSCAN quando o índice vetorial está indisponível.
+    poc["semantic_cache"].create_index([("question_norm", 1), ("area", 1)])
     AUDIT_TTL_DAYS = 30
     for coll_name in ("guardrail_events", "agent_traces", "guardrail_candidates",
                       "admin_audit"):

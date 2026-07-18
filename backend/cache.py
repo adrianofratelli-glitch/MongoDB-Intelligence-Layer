@@ -95,7 +95,9 @@ async def lookup(question: str, area: str = "default") -> dict:
             "path": CACHE_PATH,
             "query": question,
             "numCandidates": 50,
-            "limit": 1 if with_filter else 5,
+            # Sem filtro nativo o pós-filtro app-side descarta candidatos de
+            # outras áreas — 25 candidatos evitam resultado vazio com cache grande.
+            "limit": 1 if with_filter else 25,
         }
         if with_filter:
             stage["filter"] = {"area": {"$in": ["global", area]}}
@@ -110,7 +112,7 @@ async def lookup(question: str, area: str = "default") -> dict:
         mode = "vector"
     except Exception:  # noqa: BLE001 — filtro não indexado → pós-filtro app-side
         try:
-            docs = await aggregate_list(coll, _pipeline(False), length=5, maxTimeMS=MAX_TIME_MS)
+            docs = await aggregate_list(coll, _pipeline(False), length=25, maxTimeMS=MAX_TIME_MS)
             docs = [d for d in docs if _area_visible(d.get("area"), area)]
             mode = "vector-postfilter"
         except Exception:  # noqa: BLE001 — index not created yet → graceful fallback

@@ -154,10 +154,17 @@ RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
 _rate_windows: dict[str, deque] = defaultdict(deque)
 
 
+# X-Forwarded-For é spoofável quando o backend está exposto direto (sem proxy
+# na frente): qualquer cliente ganharia janela nova de rate limit forjando o
+# header. Só confie nele com TRUST_PROXY=1 (deploy atrás de nginx/gateway).
+TRUST_PROXY = os.getenv("TRUST_PROXY", "0") == "1"
+
+
 def client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:  # atrás de proxy (uvicorn --proxy-headers / nginx)
-        return forwarded.split(",")[0].strip()
+    if TRUST_PROXY:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
 
 
@@ -220,7 +227,25 @@ async def request_observability(request: Request, call_next):
 async def api_metrics():
     """Contadores em processo: requests/erros/latência por rota + contadores de
     negócio (cache hits, bloqueios). Produção pluga OTel/Prometheus por cima."""
-    return observability.metrics.snapshot()
+    snap = observability.metrics.snapshot()
+    # Card "Economia": USD poupado pelos cache hits, estimado pelo custo médio
+    # REAL das chamadas LLM desta sessão (tokens medidos, preço Sonnet 4.x:
+    # $3/Mtok entrada, $15/Mtok saída). Sem chamadas ainda → economia 0.
+    c = snap["counters"]
+    calls = c.get("llm_calls", 0)
+    if calls:
+        total_usd = (c.get("llm_input_tokens", 0) * 3 +
+                     c.get("llm_output_tokens", 0) * 15) / 1_000_000
+        avg_usd = total_usd / calls
+        snap["savings"] = {
+            "cache_hits": c.get("cache_hits", 0),
+            "avg_llm_call_usd": round(avg_usd, 6),
+            "estimated_saved_usd": round(c.get("cache_hits", 0) * avg_usd, 4),
+        }
+    else:
+        snap["savings"] = {"cache_hits": c.get("cache_hits", 0),
+                           "avg_llm_call_usd": 0, "estimated_saved_usd": 0}
+    return snap
 
 
 @app.exception_handler(SafeQueryError)
@@ -257,14 +282,18 @@ POC_COLLECTIONS = ["support_orders", "agent_sessions", "agent_memory",
 async def health():
     db = ai_brain()
     await safe_query(get_client().admin.command("ping"))
-    counts = {}
-    for coll in AI_BRAIN_COLLECTIONS:
-        counts[coll] = await safe_query(db[coll].count_documents({}, maxTimeMS=MAX_TIME_MS))
-    for coll in POC_COLLECTIONS:
-        counts[coll] = await safe_query(
-            poc()[coll].count_documents({}, maxTimeMS=MAX_TIME_MS)
-        )
-    cfg = await get_active_config()
+    # 13 counts sequenciais viravam soma de RTTs; em paralelo o health responde
+    # no tempo do count mais lento.
+    names = AI_BRAIN_COLLECTIONS + POC_COLLECTIONS
+    results = await asyncio.gather(
+        *[safe_query(db[c].count_documents({}, maxTimeMS=MAX_TIME_MS))
+          for c in AI_BRAIN_COLLECTIONS],
+        *[safe_query(poc()[c].count_documents({}, maxTimeMS=MAX_TIME_MS))
+          for c in POC_COLLECTIONS],
+        get_active_config(),
+    )
+    counts = dict(zip(names, results[:-1]))
+    cfg = results[-1]
     return {
         "ping": "ok",
         "counts": counts,
@@ -393,14 +422,37 @@ async def quick_chat(body: QuickChatBody, request: Request):
             "input_tokens": 0,
             "output_tokens": 0,
         }
+    masked = guard.get("masked_text") or body.question
+    # Cache semântico também aqui: mesma pergunta (semanticamente) já respondida
+    # → serve do MongoDB sem tocar o LLM. Área do usuário escopa a visibilidade.
+    cached = await cache.lookup(masked, area=area)
+    if cached.get("hit"):
+        observability.metrics.bump("cache_hits")
+        return {
+            "text": cached["answer"],
+            "model": cached.get("model") or "cache",
+            "route": "cache",
+            "latency_ms": cached["latency_ms"],
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache": cached,
+        }
     result = await call_with_fallback(
         system="Você é um assistente de e-commerce. Responda em português, em poucas frases.",
-        messages=[{"role": "user", "content": guard.get("masked_text") or body.question}],
+        messages=[{"role": "user", "content": masked}],
         area=area,
     )
     # PII na saída mascarada aqui também — mesma regra do agente
     guard_out = await guardrails.check_output(result["text"], identity, "quick-chat", area)
     result["text"] = guard_out["text"]
+    # Sem memória/tools neste endpoint → resposta é genérica por construção,
+    # segura para o cache compartilhado da área.
+    try:
+        await cache.store(masked, result["text"], result.get("model", "?"),
+                          scope="quick-chat", area=area)
+    except Exception:  # noqa: BLE001 — falha de cache nunca degrada a resposta
+        logger.exception("cache store falhou no quick-chat")
+    result["cache"] = cached
     return result
 
 

@@ -1,3 +1,4 @@
+import os
 """Two-tier agent memory, both persisted in MongoDB.
 
 Short-term memory (STM)  → POC.agent_sessions  (written by agent.py)
@@ -61,7 +62,7 @@ _DURABLE_SIGNAL_RE = re.compile(
     re.IGNORECASE,
 )
 
-client = AsyncAnthropic()
+client = AsyncAnthropic(default_headers={"api-key": os.getenv("ANTHROPIC_API_KEY", "")})
 
 
 def _utcnow() -> datetime:

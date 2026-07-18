@@ -54,7 +54,7 @@ MAX_TRACE_RESULT_CHARS = 1_200
 CHARS_PER_TOKEN_ESTIMATE = 4
 
 # Um único client HTTP para todos os turnos (pool de conexões reutilizado)
-anthropic_client = AsyncAnthropic()
+anthropic_client = AsyncAnthropic(default_headers={"api-key": os.getenv("ANTHROPIC_API_KEY", "")})
 
 LLM_RETRIES = 2            # novas tentativas no MESMO modelo antes do fallback
 LLM_BACKOFF_SECONDS = 1.0  # backoff exponencial: 1s, 2s
@@ -641,6 +641,17 @@ async def _run_tool_loop(session, tools, system_static, system_dynamic, user_msg
                 {"type": "tool_result", "tool_use_id": tu.id, "content": text,
                  "is_error": is_error}
             )
+        # Cache incremental do loop: marca o ÚLTIMO tool_result desta iteração
+        # com cache_control para que a próxima chamada reaproveite todo o
+        # prefixo (system + tools + histórico do loop). O marcador é móvel —
+        # remove o da iteração anterior para não estourar o limite de 4 blocos
+        # cache_control por request (system estático + dinâmico + tools já usam 3).
+        for prev in messages:
+            if prev["role"] == "user" and isinstance(prev["content"], list):
+                for block in prev["content"]:
+                    if isinstance(block, dict):
+                        block.pop("cache_control", None)
+        tool_results[-1] = {**tool_results[-1], "cache_control": {"type": "ephemeral"}}
         messages.append({"role": "user", "content": tool_results})
 
     return final_answer

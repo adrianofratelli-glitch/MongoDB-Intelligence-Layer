@@ -39,6 +39,7 @@ async function request(path, options = {}) {
 
 export const api = {
   health: () => request('/api/health'),
+  metrics: () => request('/api/metrics'),
 
   // Auth — o switcher de identidade é o "login" da demo
   login: async (userKey) => {

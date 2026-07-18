@@ -44,6 +44,16 @@ export default function ModelSwap({ state, setState }) {
   const [swapping, setSwapping] = useState(false);
   const [error, setError] = useState(null);
   const [flash, setFlash] = useState(0);
+  const [savings, setSavings] = useState(null);
+
+  const loadSavings = async () => {
+    try {
+      const m = await api.metrics();
+      setSavings(m.savings || null);
+    } catch {
+      /* card de economia é opcional — nunca quebra a aba */
+    }
+  };
 
   const loadConfig = async () => {
     try {
@@ -57,6 +67,7 @@ export default function ModelSwap({ state, setState }) {
 
   useEffect(() => {
     if (!config) loadConfig();
+    loadSavings();
   }, []);
 
   const swap = async () => {
@@ -86,6 +97,7 @@ export default function ModelSwap({ state, setState }) {
         ...s,
         messages: [...s.messages, { role: 'assistant', text: r.text, meta: r }],
       }));
+      loadSavings();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -146,6 +158,7 @@ export default function ModelSwap({ state, setState }) {
                       {m.meta.input_tokens}→{m.meta.output_tokens} tokens
                     </span>
                     {m.meta.route === 'fallback' && <Badge variant="red">fallback</Badge>}
+                    {m.meta.route === 'cache' && <Badge variant="green">cache semântico</Badge>}
                   </div>
                 )}
               </div>
@@ -169,6 +182,24 @@ export default function ModelSwap({ state, setState }) {
           </div>
         </div>
       </div>
+
+      {savings && savings.cache_hits > 0 && (
+        <div className="card neutral">
+          <div className="card-header">
+            <span className="card-title">Economia — cache semântico</span>
+            <span className="dim mono">{savings.cache_hits} hits nesta sessão do backend</span>
+          </div>
+          <div className="cost-grid" style={{ gap: 40 }}>
+            <div className="cost-item">
+              <div className="cost-val">${savings.estimated_saved_usd.toFixed(4)}</div>
+              <div className="cost-label">
+                poupado (~${savings.avg_llm_call_usd.toFixed(5)} por chamada LLM evitada,
+                custo médio real medido)
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {costStats(messages).length === 1 && (
         <div className="card neutral">
