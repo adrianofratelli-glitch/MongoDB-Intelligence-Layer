@@ -1,5 +1,7 @@
 # credenciais — NUNCA commitar
 .env
+.env.bak
+.env.*.bak
 
 # python
 .venv/

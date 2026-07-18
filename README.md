@@ -1,9 +1,30 @@
 # MongoDB Intelligence Layer — POC
 
-A proof of concept showing MongoDB as the data and orchestration layer for AI
-applications. Prompt schemas, model configuration, and an autonomous agent's
-memory all live as documents — and evolve with a single `update_one`, not a
-migration or a redeploy.
+## The problem
+
+Teams shipping AI features usually end up with the "intelligence" of the system
+scattered everywhere *except* the database: prompts hardcoded in the app, the
+model name in an env var, a separate vector store for embeddings, a cache in
+yet another service, and agent memory nowhere at all. Every prompt tweak, model
+swap, or policy change becomes a code change and a redeploy — and every extra
+moving part is one more thing to secure, sync, and pay for.
+
+## The idea: an intelligence layer *in* the database
+
+This proof of concept shows a different shape: MongoDB Atlas as the data **and**
+orchestration layer for an AI application. Prompt schemas, model configuration,
+semantic cache, guardrail policies, and an autonomous agent's short- and
+long-term memory all live as documents — and evolve with a single `update_one`,
+not a migration or a redeploy. What you gain:
+
+- **Live configuration** — changing a prompt, swapping the production model, or
+  tightening a guardrail is a document update the app picks up on the next
+  request. Zero restarts.
+- **One engine, fewer moving parts** — operational data, vector search,
+  semantic cache, memory, and audit trail share one cluster, one query
+  language, one security model.
+- **Everything is inspectable** — every cache hit, memory fact, guardrail
+  decision, and agent trace is a queryable document, not a black box.
 
 **Stack:** React + Vite + LeafyGreen UI · FastAPI + **PyMongo Async** (the official async driver that replaced the deprecated Motor) · MongoDB Atlas (Vector Search with autoEmbed voyage-4) · **MongoDB MCP Server** · Anthropic API (Sonnet 4.5 / Haiku 4.5)
 
