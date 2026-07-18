@@ -25,3 +25,4 @@ output/
 # playwright
 test-results/
 playwright-report/
+CLAUDE.md 
