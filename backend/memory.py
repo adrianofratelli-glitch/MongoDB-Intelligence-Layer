@@ -62,7 +62,11 @@ _DURABLE_SIGNAL_RE = re.compile(
     re.IGNORECASE,
 )
 
-client = AsyncAnthropic(default_headers={"api-key": os.getenv("ANTHROPIC_API_KEY", "")})
+client = AsyncAnthropic(
+    api_key="dummy",
+    base_url=os.getenv("ANTHROPIC_BASE_URL"),
+    default_headers={"api-key": os.getenv("ANTHROPIC_API_KEY", "")},
+)
 
 
 def _utcnow() -> datetime:

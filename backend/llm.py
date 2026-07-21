@@ -13,7 +13,11 @@ from anthropic import APIError, AsyncAnthropic
 import observability
 from db import MAX_TIME_MS, SafeQueryError, ai_brain, safe_query
 
-client = AsyncAnthropic(default_headers={"api-key": os.getenv("ANTHROPIC_API_KEY", "")})  # reads ANTHROPIC_API_KEY from the environment
+client = AsyncAnthropic(
+    api_key="dummy",  # Grove/Azure APIM auth goes via api-key header, not x-api-key
+    base_url=os.getenv("ANTHROPIC_BASE_URL"),
+    default_headers={"api-key": os.getenv("ANTHROPIC_API_KEY", "")},
+)
 
 # Micro-cache opcional do model_config. Default 0 = DESLIGADO: a regra da demo
 # ("o doc é lido a cada request, swap é instantâneo") continua valendo. Em

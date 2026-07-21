@@ -54,7 +54,11 @@ MAX_TRACE_RESULT_CHARS = 1_200
 CHARS_PER_TOKEN_ESTIMATE = 4
 
 # Um único client HTTP para todos os turnos (pool de conexões reutilizado)
-anthropic_client = AsyncAnthropic(default_headers={"api-key": os.getenv("ANTHROPIC_API_KEY", "")})
+anthropic_client = AsyncAnthropic(
+    api_key="dummy",
+    base_url=os.getenv("ANTHROPIC_BASE_URL"),
+    default_headers={"api-key": os.getenv("ANTHROPIC_API_KEY", "")},
+)
 
 LLM_RETRIES = 2            # novas tentativas no MESMO modelo antes do fallback
 LLM_BACKOFF_SECONDS = 1.0  # backoff exponencial: 1s, 2s
