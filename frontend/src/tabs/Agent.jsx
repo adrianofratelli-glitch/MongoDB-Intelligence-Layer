@@ -64,6 +64,7 @@ export default function Agent({ state, setState }) {
   const [showInspector, setShowInspector] = useState(false);
   const [playlist, setPlaylist] = useState([]);
   const [demo, setDemo] = useState({ active: false, idx: -1, paused: false });
+  const [tokensSaved, setTokensSaved] = useState(0);
   // histórico da demo: um snapshot {run, user, conversationId, turns} por script já
   // executado — permite VOLTAR aos scripts anteriores (pausado) sem nova chamada.
   const [demoHist, setDemoHist] = useState([]);
@@ -94,6 +95,12 @@ export default function Agent({ state, setState }) {
       })
       .catch(() => {});
   }, []);
+
+  // Contador acumulado de tokens economizados (cache hits evitando o LLM) —
+  // vem de /api/metrics.counters.tokens_economizados, atualiza a cada turno.
+  useEffect(() => {
+    api.metrics().then((d) => setTokensSaved(d?.counters?.tokens_economizados ?? 0)).catch(() => {});
+  }, [run]);
 
   // "Login" da demo: trocar de identidade no switcher emite um JWT novo; toda
   // request seguinte vai com Bearer e o backend resolve a identidade do token.
@@ -343,6 +350,13 @@ export default function Agent({ state, setState }) {
           <div className="agent-controls">
             <span className="dim mono" style={{ fontSize: 12 }}>
               Iteração <span className="accent-num">{iteration ?? 0}</span>
+            </span>
+            <span
+              className="dim mono"
+              style={{ fontSize: 12 }}
+              title="Total acumulado de tokens estimados evitados por respostas servidas do cache semântico, sem chamar o LLM"
+            >
+              ⚡ <span className="accent-num">{tokensSaved.toLocaleString('pt-BR')}</span> tokens economizados
             </span>
             <Button size="xsmall" darkMode onClick={reset} disabled={!run}>Reset</Button>
             <Button size="xsmall" darkMode onClick={() => go(step - 1)} disabled={!canBack}>◀ Anterior</Button>
@@ -602,7 +616,7 @@ function FeatureFlags({ run }) {
   if (cache.hit) {
     cacheClass = 'hit';
     cacheTitle = '⚡ Cache semântico · HIT';
-    cacheDetail = `Servido do MongoDB sem LLM · score ${cache.score} ≥ ${cache.threshold} · ${cache.latency_ms} ms · entrada ${cache.matched_area ? `da área ${cache.matched_area}` : 'global (FAQ)'}`;
+    cacheDetail = `Servido do MongoDB sem LLM · score ${cache.score} ≥ ${cache.threshold} · ${cache.latency_ms} ms · entrada ${cache.matched_area ? `da área ${cache.matched_area}` : 'global (FAQ)'} · ~${cache.tokens_economizados ?? 0} tokens economizados`;
   }
 
   // Memória

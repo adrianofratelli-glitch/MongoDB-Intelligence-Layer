@@ -28,6 +28,13 @@ import profiles
 from db import MAX_TIME_MS, poc
 from llm import get_active_config
 
+
+def estimate_tokens(text: str) -> int:
+    """Rough chars/4 estimate — same heuristic as the MultiAgent PoV's budget.py,
+    used only to show 'tokens saved' when a cache hit skips the LLM entirely
+    (no real provider usage exists for that turn to report instead)."""
+    return max(1, (len(text or "") + 3) // 4)
+
 logger = logging.getLogger("poc.agent")
 
 DEFAULT_USER_KEY = "cliente-demo"
@@ -901,6 +908,10 @@ async def run_agent(
 
     if cache_res["hit"]:
         final_answer = cache_res["answer"]
+        # No LLM call happens on a hit — there's no real provider usage to report,
+        # so tokens saved is an estimate over the served answer (same chars/4
+        # heuristic as the MultiAgent PoV) purely to make the savings visible in the UI.
+        cache_res["tokens_economizados"] = estimate_tokens(final_answer)
         # short-term memory still records the exchange
         turn_count = await _store_short_term(conversation_id, user_key, user_msg,
                                              final_answer, emit, metrics)

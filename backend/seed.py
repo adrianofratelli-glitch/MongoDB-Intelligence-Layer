@@ -857,12 +857,17 @@ def main():
                                         expireAfterSeconds=AUDIT_TTL_DAYS * 24 * 3600)
         except Exception as exc:  # noqa: BLE001 — TTL antigo com outro nome
             print(f"  ⚠ TTL em {coll_name}.at não recriado: {str(exc)[:120]}")
-    # memória de curto prazo: sessão sem novo turno em 1h expira sozinha (ADR-002)
-    poc["agent_sessions"].create_index("updated_at", name="ttl_updated_at_1h",
+    # memória de curto prazo: sessão sem novo turno em 24h expira sozinha (ADR-002,
+    # ampliado de 1h para sobreviver a um cliente que cai e volta no mesmo dia)
+    try:  # nome antigo (1h) fica redundante — remove antes de recriar com o novo TTL
+        poc["agent_sessions"].drop_index("ttl_updated_at_1h")
+    except Exception:  # noqa: BLE001 — não existia
+        pass
+    poc["agent_sessions"].create_index("updated_at", name="ttl_updated_at_24h",
                                        expireAfterSeconds=SESSION_IDLE_SECONDS)
     print("\nTTL: semantic_cache.expires_at (runtime) · guardrail_events.at, "
           f"agent_traces.at e guardrail_candidates.at ({AUDIT_TTL_DAYS} dias) · "
-          f"agent_sessions.updated_at ({SESSION_IDLE_SECONDS // 60} min de inatividade)")
+          f"agent_sessions.updated_at ({SESSION_IDLE_SECONDS // 3600} h de inatividade)")
 
     print("\nÍndices vetoriais (autoEmbed voyage-4):")
     create_vector_indexes(client)

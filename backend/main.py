@@ -571,6 +571,7 @@ async def agent_run(request: Request, body: AgentRunBody):
     observability.metrics.bump("agent_turns")
     if (result.get("cache") or {}).get("hit"):
         observability.metrics.bump("cache_hits")
+        observability.metrics.bump("tokens_economizados", (result.get("cache") or {}).get("tokens_economizados", 0))
     if ((result.get("guardrail") or {}).get("input") or {}).get("action") == "block":
         observability.metrics.bump("guardrail_blocks")
 
