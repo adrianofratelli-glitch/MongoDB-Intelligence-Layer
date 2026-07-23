@@ -1,6 +1,6 @@
 """Smoke test pós-deploy: valida o caminho crítico contra o backend NO AR.
 
-Uso:  python tests/smoke.py [BASE_URL]   (default http://127.0.0.1:8000)
+Uso:  python tests/smoke.py [BASE_URL]   (default http://127.0.0.1:8010)
 
 Não substitui os testes unitários — responde só "o deploy está de pé?":
 health, auth, isolamento básico e métricas. Sai com código != 0 em falha
@@ -12,7 +12,7 @@ import sys
 import urllib.error
 import urllib.request
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8010"
 FAILURES: list[str] = []
 
 

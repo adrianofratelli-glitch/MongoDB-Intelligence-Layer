@@ -220,7 +220,7 @@ real thing, not a simulation.
                              # + TTL indexes (cache, audit log, traces)
    python calibrate_thresholds.py   # optional: re-measure the score band and
                                     # suggest thresholds (--apply writes them)
-   uvicorn main:app --reload --port 8000
+   uvicorn main:app --reload --port 8010
    ```
 
    On startup a background **supervisor task** owns the MongoDB MCP Server session
@@ -232,10 +232,10 @@ real thing, not a simulation.
    ```bash
    cd frontend
    npm install
-   npm run dev               # http://localhost:5173
+   npm run dev               # http://localhost:5183
    ```
 
-The included `start.sh` boots both processes at once (FastAPI on :8000, Vite on :5173).
+The included `start.sh` boots both processes at once (FastAPI on :8010, Vite on :5183).
 
 For the current implementation invariants, file map, validation commands and
 known PoV boundaries, see [`docs/implementation-handoff.md`](docs/implementation-handoff.md).
@@ -260,7 +260,7 @@ npm run test:visual:update    # regenerates the baselines after an intentional U
 
 Dynamic regions (collection counts, live Atlas documents, agent traces) are masked, so the tests guard layout rather than data.
 
-The tests target `http://localhost:5173` by default. **If that port is taken by another app, the tests will screenshot the wrong page and fail** — start this frontend on a free port and point the tests at it:
+The tests target `http://localhost:5183` by default. **If that port is taken by another app, the tests will screenshot the wrong page and fail** — start this frontend on a free port and point the tests at it:
 
 ```bash
 npx vite --port 5174                                   # in frontend/

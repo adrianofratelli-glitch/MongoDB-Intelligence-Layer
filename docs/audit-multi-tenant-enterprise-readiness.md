@@ -69,7 +69,7 @@ Sem métricas (Prometheus/OTel), sem tracing distribuído, sem log estruturado (
 Escolha correta e documentada (ADR-001) para o volume atual, mas com nota explícita de reavaliar se algum tenant passar de ~10k vetores. É uma bomba-relógio de performance conhecida, não desconhecida — bom sinal para o cliente, mas precisa de plano de monitoramento (quem mede quando um tenant se aproxima do limite?).
 
 ### M4. Deploy em container único (app + nginx)
-`docker/start.sh` sobe uvicorn e nginx no mesmo container. O app em si é majoritariamente stateless (sessão MCP é per-process, sem estado de negócio em memória), então escala horizontalmente em réplicas — mas CORS está hardcoded para `localhost:5173`, quebra sem alteração de código atrás de domínio real. Não é bloqueio técnico, é ajuste de config antes de qualquer deploy fora do laptop.
+`docker/start.sh` sobe uvicorn e nginx no mesmo container. O app em si é majoritariamente stateless (sessão MCP é per-process, sem estado de negócio em memória), então escala horizontalmente em réplicas — mas CORS está hardcoded para `localhost:5183`, quebra sem alteração de código atrás de domínio real. Não é bloqueio técnico, é ajuste de config antes de qualquer deploy fora do laptop.
 
 ---
 

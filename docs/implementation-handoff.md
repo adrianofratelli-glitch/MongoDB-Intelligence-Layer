@@ -108,8 +108,8 @@ cd ..
 Runtime checks:
 
 ```bash
-curl http://localhost:8000/api/health
-open http://localhost:5173
+curl http://localhost:8010/api/health
+open http://localhost:5183
 ```
 
 `backend/seed.py` is idempotent and applies the `fact_norm`, regular, TTL and

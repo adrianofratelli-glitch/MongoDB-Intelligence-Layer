@@ -537,7 +537,7 @@ export default function Agent({ state, setState }) {
               <div style={{ flex: 1 }}>
                 <TextInput
                   darkMode
-                  aria-label="mensagem"
+                  label="Mensagem para o agente"
                   placeholder="Digite uma mensagem ou clique num cenário"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}

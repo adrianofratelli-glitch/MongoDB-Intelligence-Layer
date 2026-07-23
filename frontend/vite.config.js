@@ -6,9 +6,9 @@ export default defineConfig({
   // @emotion/server (dependência transitiva do LeafyGreen) usa builtins do Node
   plugins: [react(), nodePolyfills()],
   server: {
-    port: 5173,
+    port: 5183,
     proxy: {
-      '/api': 'http://localhost:8000',
+      '/api': `http://localhost:${process.env.BACKEND_PORT || 8010}`,
     },
   },
 });

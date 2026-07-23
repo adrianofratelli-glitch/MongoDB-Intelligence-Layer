@@ -27,7 +27,7 @@ async function request(path, options = {}) {
       ...options,
     });
   } catch {
-    throw new ApiError('rede', 'Backend não respondeu. O FastAPI está rodando na porta 8000?');
+    throw new ApiError('rede', 'Backend não respondeu. O FastAPI está rodando na porta 8010?');
   }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {

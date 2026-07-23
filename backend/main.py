@@ -112,7 +112,7 @@ app = FastAPI(title="MongoDB Intelligence Layer", lifespan=lifespan)
 # basta setar CORS_ORIGINS, sem alteração de código.
 CORS_ORIGINS = [
     o.strip() for o in os.getenv(
-        "CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+        "CORS_ORIGINS", "http://localhost:5183,http://127.0.0.1:5183"
     ).split(",") if o.strip()
 ]
 

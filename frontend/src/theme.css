@@ -1,19 +1,23 @@
 :root {
   --bg-primary: #001e2b;
-  --bg-secondary: #002838;
-  --bg-card: #003345;
-  --bg-card-hover: #004058;
-  --border-subtle: rgba(255, 255, 255, 0.06);
+  --bg-secondary: #112733;
+  --bg-card: #1c2d38;
+  --bg-card-hover: #263c49;
+  --border-subtle: #3d4f58;
   --border-accent: rgba(0, 237, 100, 0.25);
-  --text-pri: #fafafa;
-  --text-sec: #b8d8e8;
-  --text-muted: #7fa8bc;
+  --text-pri: #e8edeb;
+  --text-sec: #c1c7c6;
+  --text-muted: #889397;
   --accent: #00ed64;
-  --accent-glow: rgba(0, 237, 100, 0.15);
-  --purple: #a855f7;
-  --orange: #f97316;
-  --cyan: #06b6d4;
-  --teal: #14b8a6;
+  --accent-glow: rgba(0, 237, 100, 0.1);
+  --link: #0498ec;
+  --purple: #b45af2;
+  --orange: #ffc010;
+  --cyan: #0498ec;
+  --teal: #00a35c;
+  --font-sans: 'Outfit', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  color-scheme: dark;
 
   /* legacy aliases used by the tabs */
   --mdb-bg: var(--bg-primary);
@@ -34,10 +38,11 @@
 
 html {
   scroll-behavior: smooth;
+  background: var(--bg-primary);
 }
 
 body {
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-sans);
   background: var(--bg-primary);
   color: var(--text-sec);
   min-height: 100vh;
@@ -71,7 +76,17 @@ body::after {
 code,
 pre,
 .mono {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
+}
+
+::selection {
+  color: var(--text-pri);
+  background: rgba(0, 237, 100, 0.24);
+}
+
+:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 3px;
 }
 
 /* ---------- top nav ---------- */
@@ -286,7 +301,7 @@ nav.top-nav {
   position: relative;
   border-radius: 18px;
   border: 1px solid var(--border-subtle);
-  background: linear-gradient(145deg, var(--bg-secondary) 0%, rgba(0, 40, 56, 0.55) 100%);
+  background: linear-gradient(145deg, var(--bg-card) 0%, rgba(17, 39, 51, 0.72) 100%);
   padding: 1.5rem;
   transition: border-color 0.25s ease;
   overflow: hidden;
@@ -660,14 +675,14 @@ footer.app-footer p {
 .flow-node.active-alt {
   opacity: 1;
   border-color: var(--orange);
-  background: rgba(249, 115, 22, 0.08);
-  box-shadow: 0 0 16px rgba(249, 115, 22, 0.12);
+  background: rgba(255, 192, 16, 0.08);
+  box-shadow: 0 0 16px rgba(255, 192, 16, 0.12);
 }
 
 .flow-node.done-alt {
   opacity: 1;
-  border-color: rgba(249, 115, 22, 0.3);
-  background: rgba(249, 115, 22, 0.04);
+  border-color: rgba(255, 192, 16, 0.3);
+  background: rgba(255, 192, 16, 0.04);
 }
 
 .flow-node.done-alt .flow-check {
@@ -810,7 +825,7 @@ footer.app-footer p {
   padding: 0.6rem 0.7rem;
   background: rgba(0, 237, 100, 0.04);
 }
-.op-item.write { border-left-color: var(--orange); background: rgba(249, 115, 22, 0.05); }
+.op-item.write { border-left-color: var(--orange); background: rgba(255, 192, 16, 0.05); }
 .op-item.pulse { box-shadow: 0 0 14px rgba(0, 237, 100, 0.2); }
 .op-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .op-detail { font-size: 0.7rem; color: var(--text-muted); margin-top: 5px; word-break: break-all; }
@@ -822,9 +837,9 @@ footer.app-footer p {
   border-left: 3px solid var(--purple);
   border-radius: 8px;
   padding: 0.6rem 0.7rem;
-  background: rgba(168, 85, 247, 0.05);
+  background: rgba(180, 90, 242, 0.05);
 }
-.reason-item.pulse { box-shadow: 0 0 14px rgba(168, 85, 247, 0.2); }
+.reason-item.pulse { box-shadow: 0 0 14px rgba(180, 90, 242, 0.2); }
 .reason-text { font-size: 0.85rem; line-height: 1.5; color: var(--text-sec); white-space: pre-wrap; }
 .reason-meta { font-size: 0.65rem; margin-top: 5px; }
 
@@ -959,7 +974,7 @@ footer.app-footer p {
 .tool-pill.used.write {
   border-color: var(--orange);
   color: var(--orange);
-  background: rgba(249, 115, 22, 0.1);
+  background: rgba(255, 192, 16, 0.1);
 }
 
 .memory-pill {
@@ -1002,7 +1017,7 @@ footer.app-footer p {
 .feat-card.cache-miss { border-left-color: var(--text-muted); }
 
 .feat-card.guard-ok { border-left-color: var(--teal); }
-.feat-card.guard-warn { border-left-color: var(--orange); background: rgba(249, 115, 22, 0.06); }
+.feat-card.guard-warn { border-left-color: var(--orange); background: rgba(255, 192, 16, 0.06); }
 .feat-card.guard-warn .feat-title { color: var(--orange); }
 .feat-card.guard-block { border-left-color: var(--mdb-red); background: rgba(255, 105, 96, 0.08); }
 .feat-card.guard-block .feat-title { color: var(--mdb-red); }
@@ -1013,7 +1028,7 @@ footer.app-footer p {
 /* destaque da feature nova: quem fala decide persona/guardrails/cache da área */
 .feat-card.identity {
   border-left-color: var(--cyan);
-  background: rgba(6, 182, 212, 0.07);
+  background: rgba(4, 152, 236, 0.07);
 }
 .feat-card.identity .feat-title { color: var(--cyan); }
 
@@ -1106,14 +1121,14 @@ footer.app-footer p {
 }
 .demo-dot.badge-cache { outline: 1px solid rgba(0,237,100,0.25); }
 .demo-dot.badge-guardrail { outline: 1px solid rgba(255,105,96,0.25); }
-.demo-dot.badge-memoria { outline: 1px solid rgba(168,85,247,0.25); }
-.demo-dot.badge-agente { outline: 1px solid rgba(6,182,212,0.25); }
-.demo-dot.badge-area { outline: 2px solid rgba(6,182,212,0.55); } /* destaque: scripts de área/identidade */
+.demo-dot.badge-memoria { outline: 1px solid rgba(180,90,242,0.25); }
+.demo-dot.badge-agente { outline: 1px solid rgba(4,152,236,0.25); }
+.demo-dot.badge-area { outline: 2px solid rgba(4,152,236,0.55); } /* destaque: scripts de área/identidade */
 .demo-user { color: var(--cyan); }
 .demo-dot.done { background: var(--text-muted); }
 .demo-dot.now { background: var(--accent); width: 26px; box-shadow: 0 0 10px rgba(0,237,100,0.5); }
-.demo-btn.pause { border-color: var(--orange); background: rgba(249,115,22,0.12); color: var(--orange); }
-.demo-btn.pause:hover:not(:disabled) { background: rgba(249,115,22,0.2); }
+.demo-btn.pause { border-color: var(--orange); background: rgba(255,192,16,0.12); color: var(--orange); }
+.demo-btn.pause:hover:not(:disabled) { background: rgba(255,192,16,0.2); }
 .demo-paused { color: var(--orange); }
 
 /* fatos supersedidos na memória longa (trilha de auditoria) */
@@ -1122,3 +1137,14 @@ footer.app-footer p {
 /* linhas da memória de curto prazo no inspetor */
 .insp-row.short-user { border-left-color: var(--cyan); }
 .insp-row.short-assistant { border-left-color: var(--accent); }
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

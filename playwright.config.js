@@ -1,6 +1,6 @@
 import { defineConfig, devices } from '@playwright/test';
 
-// Prerequisite: the app is running (./start.sh) — frontend :5173 + backend :8000.
+// Prerequisite: the app is running (./start.sh) — frontend :5183 + backend :8010.
 export default defineConfig({
   testDir: 'tests/visual',
   fullyParallel: false,
@@ -9,7 +9,7 @@ export default defineConfig({
   reporter: [['list']],
   use: {
     // Override with BASE_URL when the default port is taken by another app.
-    baseURL: process.env.BASE_URL || 'http://localhost:5173',
+    baseURL: process.env.BASE_URL || 'http://localhost:5183',
     colorScheme: 'dark',
     trace: 'off',
   },

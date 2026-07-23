@@ -169,7 +169,7 @@ export default function ModelSwap({ state, setState }) {
             <div style={{ flex: 1 }}>
               <TextInput
                 darkMode
-                aria-label="pergunta"
+                label="Pergunta para comparar modelos"
                 placeholder="ex.: qual a capital da Austrália?"
                 value={question}
                 onChange={(e) => setQuestion(e.target.value)}
