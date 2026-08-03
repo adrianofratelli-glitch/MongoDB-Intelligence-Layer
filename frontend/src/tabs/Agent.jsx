@@ -50,6 +50,26 @@ const FALLBACK_USER = {
   area_label: 'Suporte E-commerce',
 };
 
+// Ponteiro user_key → session_id ativo, persistido na aba. Só o ponteiro: os
+// turnos em si continuam sendo lidos do MongoDB (POC.agent_sessions).
+const CONV_MAP_KEY = 'poc.agent.convMap';
+
+function readConvMap() {
+  try {
+    return JSON.parse(sessionStorage.getItem(CONV_MAP_KEY) ?? '{}') ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function persistConvMap(map) {
+  try {
+    sessionStorage.setItem(CONV_MAP_KEY, JSON.stringify(map));
+  } catch {
+    /* modo privado / storage cheio: a demo segue, só não sobrevive ao F5 */
+  }
+}
+
 export default function Agent({ state, setState }) {
   const { run, step, iteration, conversationId, turns = [] } = state;
   const [scenarios, setScenarios] = useState([]);
@@ -72,7 +92,10 @@ export default function Agent({ state, setState }) {
   const demoTimerRef = useRef(null); // separado do replay: não é limpo pelo cleanup do replay
   // conversa corrente de cada usuário: trocar de identidade e voltar retoma a
   // MESMA sessão daquele usuário (a memória curta continua de onde parou).
-  const convMapRef = useRef({});
+  // Persistido em sessionStorage: um F5 no meio da demo não pode inventar uma
+  // sessão nova e fazer a memória curta parecer perdida (ela vive no Atlas, com
+  // TTL de 24h — o que se perdia era só o ponteiro no browser).
+  const convMapRef = useRef(readConvMap());
   // refs read inside the replay-end effect (avoid stale closures on chaining)
   const demoRef = useRef(demo);
   const playlistRef = useRef(playlist);
@@ -105,11 +128,40 @@ export default function Agent({ state, setState }) {
   // "Login" da demo: trocar de identidade no switcher emite um JWT novo; toda
   // request seguinte vai com Bearer e o backend resolve a identidade do token.
   useEffect(() => {
-    if (user?.user_key) api.login(user.user_key).catch(() => {});
+    let cancelled = false;
+    (async () => {
+      if (!user?.user_key) return;
+      try {
+        await api.login(user.user_key);
+      } catch {
+        return; // sem token não adianta pedir a sessão: o backend nega
+      }
+      if (cancelled) return;
+      // Reidrata a memória curta a partir do MongoDB. Sem isso, voltar para um
+      // usuário mostrava o transcript vazio mesmo com a sessão viva no Atlas —
+      // parecia perda de contexto e era só a tela.
+      const convId = convMapRef.current[user.user_key];
+      if (!convId) return;
+      try {
+        const doc = await api.memoryShort(convId, user.user_key);
+        if (cancelled) return;
+        const restored = (doc?.turns ?? []).map((t) => ({
+          role: t.role === 'assistant' ? 'agent' : 'user',
+          text: t.content,
+        }));
+        if (!restored.length) return;
+        // só preenche se a tela ainda está vazia — nunca sobrescreve um turno
+        // que acabou de ser executado
+        setState((s) => (s.turns?.length ? s : { ...s, conversationId: convId, turns: restored }));
+      } catch {
+        /* sessão expirada pelo TTL ou indisponível: segue com transcript vazio */
+      }
+    })();
     // chips de sugestão são POR ÁREA: trocar de identidade recarrega os cenários
     // do departamento do usuário atual.
     api.agentScenarios(user?.user_key).then((d) => setScenarios(d.scenarios)).catch(() => {});
-  }, [user?.user_key]);
+    return () => { cancelled = true; };
+  }, [user?.user_key, setState]);
 
   const events = run?.trace ?? [];
   const lastStep = events.length - 1;
@@ -229,6 +281,7 @@ export default function Agent({ state, setState }) {
       const result = await api.agentRun({ ...payload, conversation_id: convId, user_key: target.user_key });
       const finalConvId = result.conversation_id ?? convId;
       convMapRef.current[target.user_key] = finalConvId;
+      persistConvMap(convMapRef.current);
       const newTurns = [
         ...(switched ? [] : turns ?? []),
         { role: 'user', text: result.user_message },
@@ -283,6 +336,7 @@ export default function Agent({ state, setState }) {
     setWalk(false);
     setDemo({ active: false, idx: -1, paused: false });
     delete convMapRef.current[user.user_key];
+    persistConvMap(convMapRef.current);
     setState({ run: null, step: -1, iteration: 0, conversationId: null, turns: [] });
   };
 
@@ -292,6 +346,8 @@ export default function Agent({ state, setState }) {
     if (busy || u.user_key === user.user_key) return;
     stopDemo();
     setUser(u);
+    // turns: [] é provisório — o efeito de login reidrata o transcript desse
+    // usuário a partir de POC.agent_sessions (a sessão dele continua viva).
     setState({
       run: null, step: -1, iteration: 0,
       conversationId: convMapRef.current[u.user_key] ?? null, turns: [],

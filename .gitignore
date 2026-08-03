@@ -25,4 +25,5 @@ output/
 # playwright
 test-results/
 playwright-report/
+graphify-out/
 CLAUDE.md 

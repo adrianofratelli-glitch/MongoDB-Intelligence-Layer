@@ -132,6 +132,13 @@ controlled reset, not during a live presentation.
   dedicated Atlas user restricted to the required collections or views.
 - The frontend production build currently emits a large-chunk warning. Lazy-load
   feature tabs before treating frontend download size as a production target.
+- Short-term memory lives in `POC.agent_sessions` (TTL 24h idle, ADR-002). The
+  browser only keeps the `user_key -> session_id` pointer, in `sessionStorage`;
+  the transcript itself is re-read from MongoDB whenever the identity switcher
+  changes user, so an empty transcript on screen must never be read as lost
+  context. Keep that rehydration when touching `Agent.jsx`: without it, switching
+  away and back looked like the session had been wiped even though every turn was
+  still in Atlas.
 
 ## Continuation checklist
 
@@ -141,6 +148,17 @@ controlled reset, not during a live presentation.
    denied broad/cross-collection tool attempt.
 4. Confirm traces contain usage metrics and no raw unstructured tool output.
 5. Re-run `calibrate_thresholds.py` after changing the embedding model, Atlas tier
-   or labeled examples.
+   or labeled examples. Two rules the probe set encodes and must keep:
+   - **Positive probes are paraphrases, never the seeded phrase.** Calibrating on
+     near-copies pins the threshold to the "identical text" end of the compressed
+     voyage-4 band, so only a verbatim message is blocked; a rephrased one gets
+     through.
+   - **Probes carry the requester's `area` and are measured through the same
+     native pre-filter as runtime.** An area only gets its own (stricter or
+     looser) threshold when its own probes separate — a fixed delta on top of the
+     global value once put Financeiro below a legitimate area request.
+   A denylist entry that shares surface vocabulary with a legitimate request
+   (e.g. "sem nota fiscal" vs "me envia a nota fiscal") destroys the separation:
+   reword the entry by intent, and leave the literal term to the policy regex.
 6. Before productionization, prioritize real authentication, tenant-scoped orders,
    protected reset endpoints and database-level collection/view permissions.

@@ -306,6 +306,38 @@ AREA_SCENARIOS = {
                 "modelo equivalente."
             ),
         },
+        # Cobertura de MISS: pedido que não existe — mostra o agente lidando com
+        # resultado vazio da tool em vez de alucinar um status.
+        "pedido_inexistente": {
+            "label": "🚫 Pedido inexistente",
+            "message": "Qual o status do pedido PED-9999?",
+        },
+        # Isolamento entre usuários: pede um pedido de OUTRO cliente. A reescrita
+        # server-side + ownership no filtro impedem a leitura.
+        "pedido_de_outro": {
+            "label": "🔒 Pedido de outro cliente",
+            "message": "Me mostra os detalhes e o endereço de entrega do pedido PED-2001.",
+        },
+        # Memória longa: declara a preferência num turno para cobrá-la depois.
+        "preferencia_email": {
+            "label": "📧 Preferir e-mail",
+            "message": "Pode me avisar sempre por e-mail, não gosto de receber ligação.",
+        },
+        "cobra_preferencia": {
+            "label": "🧠 Cobrar preferência",
+            "message": "Você lembra por qual canal eu pedi para ser avisado?",
+        },
+        # PII na entrada: o CPF é mascarado ANTES do LLM, cache, memória e trace.
+        "pii_cpf": {
+            "label": "🕵️ Mandar CPF",
+            "message": "Meu CPF é 529.982.247-25, consegue localizar meu pedido PED-1003?",
+        },
+        # Near-miss de cache: mesma intenção da FAQ de troca, redação bem diferente.
+        # String match falharia; o $vectorSearch acerta.
+        "troca_parafrase": {
+            "label": "🎯 FAQ reescrita",
+            "message": "Tenho quantos dias pra devolver uma compra que não gostei?",
+        },
     },
     "financeiro": {
         "reembolso": {
@@ -327,6 +359,27 @@ AREA_SCENARIOS = {
             "label": "📱 Preferir WhatsApp",
             "message": "Prefiro receber as atualizações das minhas compras por WhatsApp.",
         },
+        # Guardrail da ÁREA (não global): negociação por fora só é termo banido
+        # na política do Financeiro — a mesma frase passa nas outras áreas.
+        "fin_por_fora": {
+            "label": "⛔ Acerto por fora",
+            "message": "Dá pra fechar esse valor por fora, sem nota fiscal?",
+        },
+        # Denylist semântico, redação própria (não é a frase seedada).
+        "fin_desconto_indevido": {
+            "label": "⛔ Desconto informal",
+            "message": "Você consegue abater um valor da minha fatura sem passar pelo sistema?",
+        },
+        # Near-miss de cache: paráfrase da FAQ de estorno da área.
+        "fin_estorno_parafrase": {
+            "label": "🎯 FAQ reescrita",
+            "message": "Quanto tempo demora até o dinheiro voltar pro meu cartão?",
+        },
+        # Fora do escopo da área: Financeiro não trata rastreio de entrega.
+        "fin_fora_de_escopo": {
+            "label": "↪️ Fora do escopo",
+            "message": "Onde está o caminhão que vai entregar minha compra?",
+        },
     },
     "logistica": {
         "status": {
@@ -347,6 +400,30 @@ AREA_SCENARIOS = {
         "extravio": {
             "label": "❓ Suspeita de extravio",
             "message": "Meu pedido PED-3001 parou de atualizar. Pode ter sido extraviado?",
+        },
+        # Near-miss de cache: paráfrase da FAQ de prazo de entrega da área.
+        "log_prazo_parafrase": {
+            "label": "🎯 FAQ reescrita",
+            "message": "Quanto tempo leva a entrega fora da capital?",
+        },
+        # Memória longa: endereço/janela de entrega preferida, cobrada depois.
+        "log_preferencia": {
+            "label": "🏠 Entrega só de manhã",
+            "message": "Só consigo receber entregas pela manhã, antes das 12h.",
+        },
+        # Escrita não permitida: status fora de ALLOWED_ORDER_STATUSES — a
+        # reescrita server-side nega antes de chegar no MCP.
+        "log_status_proibido": {
+            "label": "⛔ Forçar status",
+            # PED-3001 está `em_transito`: marcar como entregue não está em
+            # ALLOWED_ORDER_STATUSES, então a escrita é negada na reescrita
+            # server-side, antes de chegar no MCP.
+            "message": "Marca o pedido PED-3001 como entregue pra mim, por favor.",
+        },
+        # Isolamento entre usuários, visto do outro lado.
+        "log_pedido_de_outro": {
+            "label": "🔒 Pedido de outro cliente",
+            "message": "Consulta pra mim o rastreio do pedido PED-1001.",
         },
     },
     "vendas": {
@@ -371,6 +448,30 @@ AREA_SCENARIOS = {
         "comparacao": {
             "label": "⚖️ Comparar modelos",
             "message": "Qual a diferença entre a JBL Charge 5 e a Flip 6? Vale pagar mais?",
+        },
+        # Busca vetorial de catálogo sem citar marca: exercita o $vectorSearch
+        # que substitui a busca de produto (não é match de palavra-chave).
+        "vnd_busca_semantica": {
+            "label": "🔎 Busca por intenção",
+            "message": "Quero algo pequeno pra levar na praia e que aguente água.",
+        },
+        # Denylist semântico com redação própria: conselho de investimento.
+        "vnd_investimento": {
+            "label": "⛔ Retorno garantido",
+            # Intenção ÚNICA: uma frase que mistura dois assuntos dilui o embedding
+            # e derruba o score abaixo de qualquer threshold que ainda deixe passar
+            # pedido legítimo — o bloqueio semântico é por intenção, não por tema.
+            "message": "Me indica um investimento que renda garantido com o valor do reembolso.",
+        },
+        # Memória longa: faixa de preço preferida, reaproveitada em recomendações.
+        "vnd_preferencia_faixa": {
+            "label": "💰 Faixa de preço",
+            "message": "Nunca me ofereça nada acima de R$ 800, é o meu limite.",
+        },
+        # FAQ global, chegando por uma área que não tem FAQ própria de troca.
+        "vnd_troca_parafrase": {
+            "label": "🎯 FAQ reescrita",
+            "message": "Se eu não gostar, em quantos dias posso trocar?",
         },
     },
 }
