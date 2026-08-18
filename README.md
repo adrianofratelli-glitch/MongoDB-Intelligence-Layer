@@ -76,7 +76,7 @@ cp .env.example .env
 ./start.sh          # FastAPI :8010 + Vite :5183
 ```
 
-Separadamente: `cd backend && .venv/bin/uvicorn main:app --reload --port 8010` e `cd frontend && npm install && npm run dev`.
+Por padrão, o launcher serve o build otimizado do frontend sem watcher. Para desenvolver com HMR, rode `POV_DEV=1 ./start.sh`; o build só é refeito quando fontes, lockfile ou configuração mudam. Separadamente: `cd backend && .venv/bin/uvicorn main:app --reload --port 8010` e `cd frontend && npm run dev`.
 
 ```bash
 cd backend && .venv/bin/python -m unittest discover -s tests -v

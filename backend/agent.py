@@ -26,7 +26,7 @@ import guardrails
 import memory
 import profiles
 from db import MAX_TIME_MS, poc
-from guidance import denial_hint, empty_order_hint
+from guidance import denial_hint, empty_order_hint, is_obviously_out_of_scope, scope_reply
 from llm import get_active_config
 
 
@@ -1091,6 +1091,26 @@ async def run_agent(
                        trace, metrics, guard_in,
                        {"hit": False, "blocked": True}, None, None, agent_model,
                        profile_info)
+
+    if is_obviously_out_of_scope(user_msg):
+        final_answer = await scope_reply(user_key)
+        metrics["reads"] += 1
+        metrics["memory_extraction_skipped"] = True
+        emit(
+            "retrieve", "tool_call", actor="mongodb", tool="find (support_orders)",
+            args={"database": "POC", "collection": "support_orders", "filter": {"owner_user_key": user_key}},
+            result="Solicitação fora de escopo redirecionada com os pedidos reais desta identidade.",
+            reads=metrics["reads"], writes=metrics["writes"],
+        )
+        turn_count = await _store_short_term(
+            conversation_id, user_key, user_msg, final_answer, emit, metrics,
+        )
+        emit("act", "message", actor="agent", text=final_answer)
+        return _result(
+            scenario, user_msg, final_answer, conversation_id, turn_count,
+            trace, metrics, guard_in, {"hit": False, "scope_redirect": True},
+            None, None, agent_model, profile_info,
+        )
 
     # ---- Semantic cache lookup (scoped to the user's area) ---------------------
     cache_res = await cache.lookup(user_msg, area)

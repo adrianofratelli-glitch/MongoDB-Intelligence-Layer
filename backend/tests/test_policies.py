@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agent  # noqa: E402
 import cache  # noqa: E402
 import guardrails  # noqa: E402
+import guidance  # noqa: E402
 import memory  # noqa: E402
 
 
@@ -98,6 +99,14 @@ class GuardrailPolicyTests(unittest.TestCase):
         self.assertIsNone(
             guardrails._denylist_threshold({"denylist_threshold": "invalid"})
         )
+
+
+class ScopeRecoveryTests(unittest.TestCase):
+    def test_temperature_is_redirected_before_agent_loop(self):
+        self.assertTrue(guidance.is_obviously_out_of_scope("Qual é a temperatura hoje?"))
+
+    def test_order_question_remains_in_scope(self):
+        self.assertFalse(guidance.is_obviously_out_of_scope("Qual o status do PED-1001?"))
 
 
 class MemoryPolicyTests(unittest.TestCase):
@@ -201,6 +210,12 @@ class RuntimeSecurityTests(unittest.TestCase):
 
         with self.assertRaises(ValidationError):
             self.main.VariantBody(model_name="safe.$where")
+
+    def test_quick_chat_rejects_blank_question(self):
+        from pydantic import ValidationError
+
+        with self.assertRaises(ValidationError):
+            self.main.QuickChatBody(question="")
 
 
 if __name__ == "__main__":

@@ -22,6 +22,17 @@ logger = logging.getLogger("agent.guidance")
 ORDER_HINT_FIELDS = {"_id": 0, "order_id": 1, "product_name": 1, "status": 1}
 MAX_HINT_ORDERS = 5
 
+_OUT_OF_SCOPE_PATTERNS = (
+    "temperatura", "previsao do tempo", "previsão do tempo", "clima hoje",
+    "placar", "resultado do jogo", "receita culinaria", "receita culinária",
+    "horoscopo", "horóscopo",
+)
+
+
+def is_obviously_out_of_scope(message: str) -> bool:
+    normalized = " ".join((message or "").lower().split())
+    return any(pattern in normalized for pattern in _OUT_OF_SCOPE_PATTERNS)
+
 
 async def user_orders(user_key: str) -> list[dict]:
     """Os pedidos DESTA identidade. Falha vira lista vazia — orientação é auxiliar."""
@@ -42,6 +53,23 @@ def _format_orders(orders: list[dict]) -> str:
         f"- {item.get('order_id')} — {item.get('product_name', 'produto')} "
         f"(status: {item.get('status', '—')})"
         for item in orders
+    )
+
+
+async def scope_reply(user_key: str) -> str:
+    """Useful deterministic redirect that does not depend on MCP or the LLM."""
+    orders = await user_orders(user_key)
+    base = (
+        "Essa solicitação está fora do atendimento desta loja. Posso ajudar com status, "
+        "troca ou reembolso de pedidos, busca no catálogo e preferências de atendimento."
+    )
+    if not orders:
+        return base + " Se você tiver um número de pedido, envie-o; para produtos, descreva o que procura."
+    return (
+        base
+        + "\n\nPedidos disponíveis para você:\n"
+        + _format_orders(orders)
+        + "\n\nDiga qual deles você quer tratar."
     )
 
 

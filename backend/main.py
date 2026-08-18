@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 import auth
 import cache
 import guardrails
+import guidance
 import memory
 import observability
 import profiles
@@ -442,7 +443,7 @@ async def swap_models(request: Request, area: str = "default"):
 
 
 class QuickChatBody(BaseModel):
-    question: str = Field(max_length=4_000)
+    question: str = Field(min_length=1, max_length=4_000)
     user_key: str | None = Field(default=None, max_length=128)
 
 
@@ -471,6 +472,15 @@ async def quick_chat(body: QuickChatBody, request: Request):
             "output_tokens": 0,
         }
     masked = guard.get("masked_text") or body.question
+    if guidance.is_obviously_out_of_scope(masked):
+        return {
+            "text": await guidance.scope_reply(identity),
+            "model": "deterministic_scope_router",
+            "route": "scope_redirect",
+            "latency_ms": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
     # Cache semântico também aqui: mesma pergunta (semanticamente) já respondida
     # → serve do MongoDB sem tocar o LLM. Área do usuário escopa a visibilidade.
     cached = await cache.lookup(masked, area=area)
@@ -507,7 +517,7 @@ async def quick_chat(body: QuickChatBody, request: Request):
 # ---------- Auth (JWT demo-issuer; produção troca a emissão pelo IdP) ----------
 
 class TokenBody(BaseModel):
-    user_key: str = Field(max_length=128)
+    user_key: str = Field(min_length=1, max_length=128)
 
 
 @app.post("/api/auth/token")

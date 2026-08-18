@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
-import FlexibleSchema from './tabs/FlexibleSchema.jsx';
-import ModelSwap from './tabs/ModelSwap.jsx';
-import Agent from './tabs/Agent.jsx';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { api } from './api.js';
+
+const FlexibleSchema = lazy(() => import('./tabs/FlexibleSchema.jsx'));
+const ModelSwap = lazy(() => import('./tabs/ModelSwap.jsx'));
+const Agent = lazy(() => import('./tabs/Agent.jsx'));
 
 const TABS = [
   '01 · Schema Flexível',
@@ -12,6 +13,7 @@ const TABS = [
 
 export default function App() {
   const [selected, setSelected] = useState(0);
+  const [visited, setVisited] = useState(() => new Set([0]));
 
   // Result state lives HERE (lifted state): switching tabs or re-rendering
   // any component never wipes pipeline/chat results.
@@ -32,6 +34,7 @@ export default function App() {
   useEffect(() => {
     let alive = true;
     const tick = async () => {
+      if (document.visibilityState !== 'visible') return;
       try {
         const h = await api.health();
         if (alive) {
@@ -56,6 +59,11 @@ export default function App() {
     <Agent state={agentState} setState={setAgentState} />,
   ];
 
+  const selectTab = (index) => {
+    setVisited((current) => new Set(current).add(index));
+    setSelected(index);
+  };
+
   const counts = health?.counts ?? {};
 
   return (
@@ -70,7 +78,7 @@ export default function App() {
               <button
                 key={name}
                 className={`nav-pill ${i === selected ? 'active' : ''}`}
-                onClick={() => setSelected(i)}
+                onClick={() => selectTab(i)}
               >
                 {name}
               </button>
@@ -118,9 +126,11 @@ export default function App() {
           </div>
         </div>
 
-        {panes.map((pane, i) => (
+        {panes.map((pane, i) => visited.has(i) && (
           <div key={i} style={{ display: i === selected ? 'block' : 'none' }}>
-            <div className={i === selected ? 'fade-in' : ''}>{pane}</div>
+            <Suspense fallback={<div className="card">Carregando etapa…</div>}>
+              <div className={i === selected ? 'fade-in' : ''}>{pane}</div>
+            </Suspense>
           </div>
         ))}
       </main>

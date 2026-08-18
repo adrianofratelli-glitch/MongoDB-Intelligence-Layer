@@ -3,6 +3,9 @@ import react from '@vitejs/plugin-react';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+const apiProxy = {
+  '/api': `http://localhost:${process.env.BACKEND_PORT || 8010}`,
+};
 
 export default defineConfig({
   plugins: [react()],
@@ -18,21 +21,7 @@ export default defineConfig({
   server: {
     port: 5183,
     strictPort: true,
-    proxy: {
-      '/api': `http://localhost:${process.env.BACKEND_PORT || 8010}`,
-    },
+    proxy: apiProxy,
   },
-  build: {
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (!id.includes('node_modules')) return;
-          if (id.includes('@leafygreen-ui') || id.includes('@lg-')) return 'leafygreen';
-          if (id.includes('@emotion')) return 'emotion';
-          if (/node_modules\/(react|react-dom|scheduler)\//.test(id)) return 'react';
-          return 'vendor';
-        },
-      },
-    },
-  },
+  preview: { port: 5183, strictPort: true, proxy: apiProxy },
 });

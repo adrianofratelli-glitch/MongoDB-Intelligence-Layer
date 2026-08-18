@@ -26,4 +26,19 @@ if ! curl -fsS "http://127.0.0.1:$BACKEND_PORT/api/health" >/dev/null 2>&1; then
 fi
 
 echo "▶ frontend Vite :${PORT:-5183}"
-cd frontend && exec npx vite --port "${PORT:-5183}" --strictPort
+cd frontend
+[ -x node_modules/.bin/vite ] || npm install
+if [ "${POV_DEV:-0}" != "1" ] && {
+  [ ! -f dist/index.html ] ||
+  [ -n "$(find src -type f -newer dist/index.html -print -quit)" ] ||
+  [ package-lock.json -nt dist/index.html ] ||
+  [ vite.config.js -nt dist/index.html ];
+}; then
+  echo "▶ gerando frontend otimizado"
+  npm run build
+fi
+export BACKEND_PORT
+if [ "${POV_DEV:-0}" = "1" ]; then
+  exec node_modules/.bin/vite --host 127.0.0.1 --port "${PORT:-5183}" --strictPort
+fi
+exec node_modules/.bin/vite preview --host 127.0.0.1 --port "${PORT:-5183}" --strictPort
