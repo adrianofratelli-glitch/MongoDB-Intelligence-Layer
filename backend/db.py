@@ -9,6 +9,7 @@ with a user-friendly message — the frontend renders it in a Banner, never a st
 """
 
 import os
+import logging
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -32,6 +33,7 @@ MAX_TIME_MS = 10_000
 # cold session — matches the semantic_cache/short_term_memory TTL on the
 # MultiAgent PoV, so both demos tell the same story about session continuity.
 SESSION_IDLE_SECONDS = 86400
+logger = logging.getLogger("poc.db")
 
 _client: AsyncMongoClient | None = None
 
@@ -108,7 +110,11 @@ async def safe_query(awaitable):
                 "indice",
                 "Índice necessário não encontrado nesta collection.",
             )
-        raise SafeQueryError("operacao", f"Operação rejeitada pelo MongoDB: {e.details.get('errmsg', str(e)) if e.details else e}")
+        logger.warning("MongoDB operation rejected code=%s", e.code, exc_info=True)
+        raise SafeQueryError(
+            "operacao",
+            "Operação rejeitada pelo MongoDB. Consulte o request-id nos logs do backend.",
+        ) from e
     except ConnectionFailure:
         raise SafeQueryError(
             "conexao",

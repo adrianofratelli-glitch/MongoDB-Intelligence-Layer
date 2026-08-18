@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import agent  # noqa: E402
 import cache  # noqa: E402
+import guardrails  # noqa: E402
 import memory  # noqa: E402
 
 
@@ -80,6 +81,23 @@ class CacheIsolationFallbackTests(unittest.TestCase):
     def test_other_area_is_not_visible(self):
         self.assertFalse(cache._area_visible("financeiro", "default"))
         self.assertFalse(cache._area_visible("default", "financeiro"))
+
+
+class GuardrailPolicyTests(unittest.TestCase):
+    def test_canonical_threshold_has_precedence(self):
+        policy = {"denylist_threshold": 0.81, "vector_threshold": 0.72}
+        self.assertEqual(guardrails._denylist_threshold(policy), 0.81)
+
+    def test_legacy_vector_threshold_is_supported(self):
+        self.assertEqual(
+            guardrails._denylist_threshold({"vector_threshold": 0.7791}), 0.7791
+        )
+
+    def test_missing_or_invalid_threshold_does_not_use_obsolete_score_scale(self):
+        self.assertIsNone(guardrails._denylist_threshold({}))
+        self.assertIsNone(
+            guardrails._denylist_threshold({"denylist_threshold": "invalid"})
+        )
 
 
 class MemoryPolicyTests(unittest.TestCase):
@@ -158,6 +176,31 @@ class RateLimitTests(unittest.TestCase):
         self.main._rate_windows["stale"].append(_time.monotonic() - 120)
         self.main.enforce_rate_limit("fresh")
         self.assertNotIn("stale", self.main._rate_windows)
+
+
+class RuntimeSecurityTests(unittest.TestCase):
+    def setUp(self):
+        import main
+        self.main = main
+
+    def test_secure_production_config_is_accepted(self):
+        self.main.validate_runtime_security(
+            "production", "a" * 24, "j" * 32, True, False,
+            ["https://pov.example.com"],
+        )
+
+    def test_demo_issuer_is_rejected_in_production(self):
+        with self.assertRaises(RuntimeError):
+            self.main.validate_runtime_security(
+                "production", "a" * 24, "j" * 32, True, True,
+                ["https://pov.example.com"],
+            )
+
+    def test_variant_model_name_rejects_mongodb_path_injection(self):
+        from pydantic import ValidationError
+
+        with self.assertRaises(ValidationError):
+            self.main.VariantBody(model_name="safe.$where")
 
 
 if __name__ == "__main__":

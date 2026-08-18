@@ -162,3 +162,16 @@ controlled reset, not during a live presentation.
    reword the entry by intent, and leave the literal term to the policy regex.
 6. Before productionization, prioritize real authentication, tenant-scoped orders,
    protected reset endpoints and database-level collection/view permissions.
+
+## Camada de resiliência (2026-08-18)
+
+Invariantes novos, todos verificados contra o cluster real:
+
+- **`connectionId` é do servidor, nunca do modelo.** Resolvido uma vez por sessão MCP via `list-connections` (`agent.resolve_connection_id`, cache por `id(session)`, default `"preconfigured"`) e injetado depois da reescrita. Sem isso o modelo inventava `"default"`/`"mongodb-atlas"`, o MCP recusava com *"Connection does not exist or has expired"* e o agente concluía na frente do cliente que "não consigo acessar o catálogo" — com o cluster no ar. Era isso que quebrava a busca vetorial de catálogo.
+- **Busca de pedido sem resultado não é erro.** O MCP marca `isError` para zero documentos; o agente reagia com três tentativas e um pedido de desculpas por falha técnica inexistente. `_is_empty_order_read` converte para sucesso com zero documentos e anexa, via `guidance.empty_order_hint`, os pedidos REAIS daquela identidade (mesmo filtro de dono) — o modelo oferece o próximo passo em vez de encerrar.
+- **Negação leva saída junto.** `guidance.denial_hint` mantém o texto da negação intacto e acrescenta o que o agente PODE fazer + os pedidos disponíveis, para que política de segurança não chegue ao cliente como erro técnico.
+- **O reescritor normaliza `query` do `$vectorSearch`** aceitando `"texto"` e `{"text": "texto"}` — as duas formas aparecem na documentação do autoEmbed, e rejeitar a segunda derrubava o catálogo.
+- **O `aggregate` passa a ser remontado por inteiro** (não só o `pipeline`), então opção extra inventada pelo modelo não sobrevive.
+- **`seed.py` invalida o cache de runtime** (`semantic_cache` com `scope != "faq"`) e as sessões antes de regravar os dados: resposta em cache derivada do mundo anterior passaria a contradizer o banco.
+- **Prompt:** saudação, agradecimento e pergunta fora de escopo respondem sem chamar ferramenta; fora de escopo reconhece a pergunta em uma frase antes de redirecionar.
+

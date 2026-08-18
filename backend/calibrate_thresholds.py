@@ -1,8 +1,8 @@
 """Calibra os thresholds do cache semântico e do denylist POR MEDIÇÃO.
 
-Por que isso existe: o autoEmbed voyage-4 expõe o vectorSearchScore numa banda
-comprimida (neste cluster: ~0.5014 não-relacionado → ~0.5056 texto IDÊNTICO —
-sim, idêntico não dá 1.0). O ranking é confiável; a escala absoluta não é.
+Por que isso existe: a escala do vectorSearchScore do autoEmbed voyage-4 pode
+mudar quando o índice/modelo é atualizado (neste cluster ela passou de ~0.50
+para ~0.59–0.86 em 2026-08). O ranking é confiável; a escala absoluta não é.
 Portanto nenhum threshold aqui pode ser "chute" — ele é medido contra pares
 rotulados e gravado como config viva (ai_brain.cache_config e
 ai_brain.guardrail_policies), editável com update_one, sem deploy.
@@ -171,13 +171,19 @@ def main() -> None:
         # elas recebem o valor da própria medição logo abaixo.
         r = ai_brain["guardrail_policies"].update_many(
             {"active": True, "area": {"$nin": list(per_area)}},
-            {"$set": {"denylist_threshold": deny_thr, "updated_at": now}},
+            {
+                "$set": {"denylist_threshold": deny_thr, "updated_at": now},
+                "$unset": {"vector_threshold": "", "threshold": ""},
+            },
         )
         print(f"✓ denylist_threshold ← {deny_thr} em {r.modified_count} política(s)")
     for area, thr in per_area.items():
         ra = ai_brain["guardrail_policies"].update_many(
             {"active": True, "area": area},
-            {"$set": {"denylist_threshold": thr, "updated_at": now}},
+            {
+                "$set": {"denylist_threshold": thr, "updated_at": now},
+                "$unset": {"vector_threshold": "", "threshold": ""},
+            },
         )
         print(f"✓ denylist_threshold ← {thr} em {ra.modified_count} política(s) "
               f"da área '{area}' (medido com os probes da própria área)")

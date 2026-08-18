@@ -10,7 +10,8 @@ RUN npm run build
 FROM python:3.12-slim AS runtime
 RUN apt-get update \
   && apt-get install -y --no-install-recommends nginx curl \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && useradd --create-home --uid 10001 app
 
 WORKDIR /app
 
@@ -21,7 +22,8 @@ COPY backend/ ./backend/
 COPY --from=frontend-build /build/dist ./frontend/dist
 COPY nginx.conf /etc/nginx/nginx.conf
 COPY docker/start.sh /start.sh
-RUN chmod +x /start.sh
+RUN chmod +x /start.sh && chown -R app:app /app
+USER app
 
 EXPOSE 8080
 

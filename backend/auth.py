@@ -80,9 +80,12 @@ def resolve_user_key(request: Request, fallback: str | None) -> str | None:
         try:
             claims = jwt.decode(token, JWT_SECRET, algorithms=[_ALGO],
                                 issuer="intelligence-layer-poc")
-            return claims.get("sub") or fallback
+            subject = claims.get("sub")
+            if not isinstance(subject, str) or not subject:
+                raise HTTPException(status_code=401, detail="Token sem identidade.")
+            return subject
         except jwt.InvalidTokenError as exc:
-            raise HTTPException(status_code=401, detail=f"Token inválido: {exc}")
+            raise HTTPException(status_code=401, detail="Token inválido.") from exc
     if AUTH_REQUIRED:
         raise HTTPException(status_code=401, detail="Bearer token obrigatório.")
     return fallback

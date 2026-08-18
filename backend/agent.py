@@ -26,6 +26,7 @@ import guardrails
 import memory
 import profiles
 from db import MAX_TIME_MS, poc
+from guidance import denial_hint, empty_order_hint
 from llm import get_active_config
 
 
@@ -65,6 +66,8 @@ anthropic_client = AsyncAnthropic(
     api_key="dummy",
     base_url=os.getenv("ANTHROPIC_BASE_URL"),
     default_headers={"api-key": os.getenv("ANTHROPIC_API_KEY", "")},
+    timeout=float(os.getenv("ANTHROPIC_TIMEOUT_SECONDS", "45")),
+    max_retries=0,  # retries/fallback are explicit in _create_with_retry
 )
 
 LLM_RETRIES = 2            # novas tentativas no MESMO modelo antes do fallback
@@ -139,6 +142,50 @@ ORDER_FIELDS_FOR_AGENT = {"_id": 0, "order_id": 1, "product_name": 1, "sku": 1,
 SENSITIVE_FIELD_NAMES = {"name", "customer_name", "email", "address", "endereco",
                          "cpf", "card", "cartao", "phone", "telefone"}
 ORDER_ID_RE = re.compile(r"PED-[0-9]{4,12}")
+
+
+# ---------------------------------------------------------------------------
+# Conexão do MCP: propriedade do servidor, nunca do modelo
+# ---------------------------------------------------------------------------
+# Versões recentes do MongoDB MCP Server exigem `connectionId` em cada chamada.
+# Deixar isso a cargo do modelo produz o pior tipo de falha numa demo: ele inventa
+# "default"/"mongodb-atlas", o servidor responde "Connection does not exist or has
+# expired", e o agente conclui em voz alta que "não consigo acessar o catálogo" —
+# quando o cluster estava no ar o tempo todo. Resolvemos o id uma vez por sessão e
+# injetamos em toda chamada já reescrita.
+DEFAULT_CONNECTION_ID = "preconfigured"
+_CONNECTION_IDS: dict[int, str] = {}
+_CONNECTION_RE = re.compile(r'"([^"]+)"')
+
+
+async def resolve_connection_id(session) -> str:
+    """Id da conexão ativa do MCP, cacheado por sessão (reconectou → resolve de novo)."""
+    cached = _CONNECTION_IDS.get(id(session))
+    if cached:
+        return cached
+    resolved = DEFAULT_CONNECTION_ID
+    try:
+        result = await session.call_tool("list-connections", {})
+        match = _CONNECTION_RE.search(_tool_text(result) or "")
+        if match:
+            resolved = match.group(1)
+    except Exception:  # noqa: BLE001 — sem list-connections, o default cobre
+        logger.warning("não consegui listar conexões do MCP; usando %s", DEFAULT_CONNECTION_ID)
+    _CONNECTION_IDS[id(session)] = resolved
+    return resolved
+
+
+def _is_empty_order_read(tool_name: str, target: str, text: str) -> bool:
+    """True quando um `find` em support_orders não devolveu documento nenhum.
+
+    O MCP devolve texto; em vez de assumir um formato, procuramos os marcadores de
+    vazio e a ausência de qualquer id de pedido no retorno — assim a checagem
+    sobrevive a mudanças de formatação do servidor MCP.
+    """
+    if tool_name != "find" or target != "POC.support_orders":
+        return False
+    # Se veio QUALQUER id de pedido no retorno, houve resultado — não é vazio.
+    return not ORDER_ID_RE.search(text or "")
 
 
 def _specific_order_id(tool_input: dict) -> str | None:
@@ -219,7 +266,14 @@ def _read_denial(tool_name: str, target: str, tool_input: dict,
         vector = pipeline[0]["$vectorSearch"]
         if vector.get("index") != "produtos_vector":
             return "Leitura negada: índice vetorial do catálogo inválido."
+        # O modelo alterna entre "query": "texto" e "query": {"text": "texto"} — as duas
+        # formas aparecem na documentação do $vectorSearch com autoEmbed. Rejeitar a
+        # segunda fazia a busca de catálogo falhar no meio da demo, com o modelo
+        # concluindo que "não consigo acessar o catálogo". Normaliza aqui; a remontagem
+        # do pipeline abaixo continua sendo do servidor.
         query = vector.get("query")
+        if isinstance(query, dict):
+            query = query.get("text") or query.get("query")
         if not isinstance(query, str) or not query.strip() or len(query) > 500:
             return "Leitura negada: consulta vetorial do catálogo inválida."
         try:
@@ -227,8 +281,14 @@ def _read_denial(tool_name: str, target: str, tool_input: dict,
             candidates = min(max(int(vector.get("numCandidates", 100)), limit), 100)
         except (TypeError, ValueError):
             return "Leitura negada: limites do catálogo devem ser numéricos."
-        # Replace the complete pipeline so $lookup/$out/$merge or broad projections
-        # supplied by the model cannot cross the data boundary.
+        # Rebuild the whole input, not just the pipeline: opções extras inventadas pelo
+        # modelo (ex.: "connectionId": "default"/"mongodb-atlas") fazem o MCP recusar a
+        # chamada inteira — "Connection does not exist or has expired" — e o agente
+        # conclui na frente do cliente que "não consigo acessar o catálogo". A conexão é
+        # do servidor, nunca do modelo.
+        database, collection = tool_input.get("database"), tool_input.get("collection")
+        tool_input.clear()
+        tool_input.update({"database": database, "collection": collection})
         tool_input["pipeline"] = [
             {"$vectorSearch": {
                 "index": "produtos_vector", "path": "descricao",
@@ -257,7 +317,9 @@ $vectorSearch passando o texto cru em "query" (o Atlas vetoriza na hora):
 Como agir:
 1. Antes de CADA chamada de ferramenta, escreva UMA frase curta explicando seu \
 raciocínio (em português). Seja breve.
-2. Sempre comece localizando o pedido em support_orders pelo order_id.
+2. Quando a solicitação envolver um pedido, comece localizando-o em \
+support_orders pelo order_id. Se a mensagem não for sobre um pedido (saudação, \
+agradecimento, assunto fora de escopo), NÃO chame ferramenta nenhuma.
 3. Use o catálogo (produtos_vector) só quando precisar oferecer um produto \
 substituto. Sempre projete poucos campos e limite a 3 resultados.
 4. Para reembolso, troca ou pedido danificado você DEVE atualizar o status do \
@@ -272,10 +334,26 @@ agent_memory, agent_sessions ou qualquer outra collection: a memória do cliente
 a preferência ficou registrada — a plataforma a persiste automaticamente na \
 memória de longo prazo e ela será respeitada nos próximos atendimentos. NUNCA \
 diga que "não tem acesso" para registrar preferências.
-7. Termine com uma resposta clara e cordial ao cliente, em português.
+7. FORA DE ESCOPO: se o cliente perguntar algo que não é atendimento desta loja \
+(assunto aleatório, conhecimento geral, teste), não responda ao mérito e não diga \
+apenas "não sei". Responda SEM chamar ferramenta: comece reconhecendo em UMA \
+frase que aquilo está fora do seu escopo — nunca ignore a pergunta como se ela não \
+tivesse sido feita, e nunca emende direto numa lista de pedidos — depois diga o que você resolve aqui (pedidos, status, \
+troca/reembolso, catálogo de produtos, preferências de atendimento), consulte os \
+pedidos reais do cliente com find em support_orders (sem order_id no filtro o app \
+recusa — então cite os pedidos que a plataforma já tiver informado a você) e \
+ofereça o próximo passo concreto.
+8. SEM RESULTADO: quando uma busca não encontrar o pedido, nunca encerre com \
+"não encontrei". A plataforma anexa ao resultado da ferramenta a lista dos pedidos \
+reais desta identidade — use essa lista, cite número e produto, e pergunte qual o \
+cliente quer tratar.
+9. SAUDAÇÃO: se a mensagem for só um cumprimento ("oi", "bom dia"), responda \
+cordialmente, diga o que você resolve e ofereça ajuda — sem chamar ferramenta à toa.
+10. Termine com uma resposta clara e cordial ao cliente, em português.
 
 Seja eficiente: no máximo o necessário de chamadas. Não invente dados que não \
-vieram das ferramentas."""
+vieram das ferramentas. Nunca exponha mensagem de erro técnico ao cliente: \
+traduza para o que ele pode fazer a seguir."""
 
 # Sugestões de perguntas POR ÁREA: cada departamento vê chips que fazem sentido
 # para o seu contexto e referenciam os pedidos DO PRÓPRIO usuário (isolamento).
@@ -725,17 +803,38 @@ async def _run_tool_loop(session, tools, system_static, system_dynamic, user_msg
                       else _read_denial(tu.name, target, tool_input, conversation_id, user_key))
             if denial:
                 # escrita fora da política (collection ou filtro amplo): negada
-                # ANTES de tocar o MCP
-                text = denial
+                # ANTES de tocar o MCP. A negação segue intacta; o anexo diz ao
+                # modelo o que ele PODE fazer, para o cliente não receber um erro
+                # técnico como resposta final.
+                text = await denial_hint(user_key, denial)
                 is_error = True
             else:
                 try:
+                    # depois da reescrita: a conexão é do servidor
+                    tool_input["connectionId"] = await resolve_connection_id(session)
                     result = await session.call_tool(tu.name, tool_input)
                     text = _tool_text(result)
                     is_error = bool(getattr(result, "isError", False))
+                    if _is_empty_order_read(tu.name, target, text):
+                        # "Não encontrei" NÃO é falha técnica. O MCP marca busca sem
+                        # resultado como isError, e o modelo reagia tentando de novo
+                        # (três vezes, queimando tokens) para então pedir desculpas por
+                        # um "problema técnico" que nunca existiu. Aqui o resultado vira
+                        # sucesso com zero documentos, e leva junto os pedidos REAIS
+                        # desta identidade para o modelo oferecer o próximo passo.
+                        is_error = False
+                        text = "Busca concluída: nenhum documento corresponde a esse filtro."
+                        text += await empty_order_hint(
+                            user_key, requested=_specific_order_id(tool_input)
+                        )
                 except Exception as e:  # surface tool failures into the trace, don't crash
                     text = f"Erro na ferramenta: {e}"
                     is_error = True
+            if is_error:
+                # Erro de ferramenta no log do servidor (o trace não guarda resultado
+                # não-estruturado). Sem isso, diagnosticar uma falha de MCP no meio de
+                # uma demo vira adivinhação.
+                logger.warning("tool %s falhou (%s): %s", tu.name, target, (text or "")[:500])
             tool_ms = int((time.perf_counter() - tt0) * 1000)
             metrics["latency_ms"] += tool_ms
             metrics["tools_used"] += 1

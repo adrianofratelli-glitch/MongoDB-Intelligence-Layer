@@ -130,9 +130,9 @@ MODEL_CONFIG = {
 
 # Config viva do cache semântico — mesma história do model_config: recalibrar o
 # threshold é um update_one, não um deploy. IMPORTANTANTE sobre a escala: o
-# autoEmbed voyage-4 expõe o vectorSearchScore numa banda comprimida (medida
-# neste cluster em 2026-07: ~0.5014 não-relacionado → ~0.5056 texto IDÊNTICO).
-# O ranking é confiável; a escala absoluta não é — por isso o threshold é
+# A escala do vectorSearchScore do autoEmbed voyage-4 pode mudar quando o
+# índice/modelo é atualizado (neste cluster passou de ~0.50 para ~0.59–0.86 em
+# 2026-08). O ranking é confiável; a escala absoluta não é — por isso o threshold é
 # calibrado por medição (backend/calibrate_thresholds.py), não por chute.
 CACHE_CONFIG = {
     "_id": "cache_production",
@@ -140,13 +140,13 @@ CACHE_CONFIG = {
     # Probes negativos incluem perguntas TRANSACIONAIS que citam o tema de uma FAQ
     # ("quero o reembolso do pedido PED-1002"): sem elas, o threshold servia a
     # política genérica de reembolso no lugar de consultar o pedido.
-    "hit_threshold": 0.5047,
+    "hit_threshold": 0.7617,
     "ttl_seconds": 24 * 3600,
     "calibration": {
         "method": "backend/calibrate_thresholds.py",
-        "measured_at": "2026-07-28",
-        "band": {"unrelated": 0.5017, "identical": 0.5056},
-        "separation": {"negatives_max": 0.50444, "positives_min": 0.50487},
+        "measured_at": "2026-08-12",
+        "band": {"unrelated": 0.5912, "identical": 0.8203},
+        "separation": {"negatives_max": 0.745837, "positives_min": 0.777499},
     },
     "updated_at": NOW,
 }
@@ -436,11 +436,11 @@ GUARDRAIL_POLICY = {
     "area": "default",
     # Score above which the semantic denylist blocks. Calibrated to this cluster's
     # voyage-4 autoEmbed band — medida com backend/calibrate_thresholds.py
-    # (2026-07-28: negativos ≤ 0.504865 · positivos ≥ 0.505255). Live-editable.
+    # (2026-08-12: negativos ≤ 0.768213 · positivos ≥ 0.791564). Live-editable.
     # Os probes positivos são PARÁFRASES, não a frase seedada: calibrar com
     # quase-cópias fixava o threshold na faixa de texto idêntico e só bloqueava
     # quem escrevesse exatamente a frase do denylist.
-    "denylist_threshold": 0.5051,
+    "denylist_threshold": 0.7799,
     # Se a camada semântica cair (índice ausente/mongot fora): "closed" = bloqueia
     # via regex apenas até o índice voltar. Fail-closed em toda área — ADR-001
     # risco 3: fail-open deixava a área default degradar silenciosamente.
@@ -450,7 +450,10 @@ GUARDRAIL_POLICY = {
         "de uso e segurança."
     ),
     "pii_patterns": [
-        {"name": "cpf", "pattern": r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b",
+        # (?<![A-Za-z-]) impede casar a numeração de um identificador de domínio:
+        # "PED-99999999999" tem 11 dígitos e batia como CPF, e o cliente via
+        # "não encontrei o pedido PED-«CPF removido»" na resposta.
+        {"name": "cpf", "pattern": r"(?<![A-Za-z-])\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b",
          "mask": "«CPF removido»"},
         {"name": "cartao", "pattern": r"\b(?:\d[ .-]?){13,16}\b",
          "mask": "«cartão removido»"},
@@ -468,10 +471,10 @@ GUARDRAIL_POLICY_FINANCEIRO = {
     "active": True,
     "area": "financeiro",
     # Threshold PRÓPRIO, medido com os probes da própria área (negativos ≤
-    # 0.504791 · positivos ≥ 0.505246). Não é o global menos um delta fixo: esse
+    # 0.764303 · positivos ≥ 0.791564). Não é o global menos um delta fixo: esse
     # delta arbitrário colocava o Financeiro abaixo de um pedido legítimo da
     # área ("pode me enviar a nota fiscal?"), ou seja, bloquearia cliente certo.
-    "denylist_threshold": 0.505,
+    "denylist_threshold": 0.7779,
     # Área crítica: sem camada semântica, a política manda BLOQUEAR (fail-closed)
     "semantic_fail_mode": "closed",
     "block_message": (
@@ -850,6 +853,16 @@ def main():
     for order in SUPPORT_ORDERS:
         order = {**order, "updated_at": NOW}
         poc["support_orders"].replace_one({"order_id": order["order_id"]}, order, upsert=True)
+
+    # Entradas de RUNTIME do cache morrem junto com o reset dos pedidos: elas foram
+    # geradas sobre o mundo anterior (status, preço, timeline). Sem isso o próximo
+    # turno serve um HIT afirmando um status que a collection acabou de desfazer — a
+    # demo se contradiz na tela, com confiança. As FAQs seedadas (scope "faq") ficam:
+    # elas não dependem do estado de nenhum pedido.
+    dropped = poc["semantic_cache"].delete_many({"scope": {"$ne": "faq"}}).deleted_count
+    dropped_sessions = poc["agent_sessions"].delete_many({}).deleted_count
+    print(f"Cache de runtime invalidado: {dropped} entradas de semantic_cache, "
+          f"{dropped_sessions} sessões (os dados de negócio foram redefinidos)")
 
     # Guardrail semantic denylist (Vector Search over forbidden utterances)
     for entry in GUARDRAIL_DENYLIST:

@@ -17,6 +17,8 @@ client = AsyncAnthropic(
     api_key="dummy",  # Grove/Azure APIM auth goes via api-key header, not x-api-key
     base_url=os.getenv("ANTHROPIC_BASE_URL"),
     default_headers={"api-key": os.getenv("ANTHROPIC_API_KEY", "")},
+    timeout=float(os.getenv("ANTHROPIC_TIMEOUT_SECONDS", "45")),
+    max_retries=0,  # fallback/retry is explicit in call_with_fallback
 )
 
 # Micro-cache opcional do model_config. Default 0 = DESLIGADO: a regra da demo

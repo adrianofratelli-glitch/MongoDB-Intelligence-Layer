@@ -2,7 +2,7 @@
 // Usage: node docs/screenshots.mjs  (frontend on :5173 and backend on :8000)
 import { chromium } from 'playwright';
 
-const BASE = 'http://localhost:5173';
+const BASE = 'http://localhost:5183';
 const OUT = new URL('./img/', import.meta.url).pathname;
 
 const browser = await chromium.launch();

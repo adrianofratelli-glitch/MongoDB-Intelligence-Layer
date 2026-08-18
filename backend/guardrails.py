@@ -48,6 +48,40 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _denylist_threshold(policy: dict) -> float | None:
+    """Resolve the live threshold, including the pre-migration field name.
+
+    Some already-seeded environments still store the calibrated value as
+    ``vector_threshold``. Ignoring it used the old 0.505 fallback, which belongs
+    to a previous Atlas score scale and consequently blocked almost every input.
+    ``denylist_threshold`` is canonical; the legacy key is read only so a rolling
+    deploy stays safe until the calibration migration writes the canonical key.
+    """
+    raw = policy.get("denylist_threshold")
+    if raw is None:
+        raw = policy.get("vector_threshold")
+    if raw is None:
+        logger.critical(
+            "política %s sem denylist_threshold", policy.get("_id", "<desconhecida>")
+        )
+        return None
+    try:
+        threshold = float(raw)
+    except (TypeError, ValueError):
+        logger.critical(
+            "threshold inválido na política %s: %r",
+            policy.get("_id", "<desconhecida>"), raw,
+        )
+        return None
+    if not 0.0 <= threshold <= 1.0:
+        logger.critical(
+            "threshold fora da faixa na política %s: %r",
+            policy.get("_id", "<desconhecida>"), raw,
+        )
+        return None
+    return threshold
+
+
 async def get_policy(area: str = "default") -> dict:
     """The active guardrail policy for an AREA, falling back to the default one.
 
@@ -170,8 +204,11 @@ async def check_input(text: str, user_key: str, session_id: str,
     violations: list[dict] = []
 
     # 1) semantic denylist (MongoDB Vector Search), scoped to the area
-    threshold = float(policy.get("denylist_threshold", 0.505))
-    match, semantic_available, near_miss = await _semantic_denylist(text, threshold, area)
+    threshold = _denylist_threshold(policy)
+    if threshold is None:
+        match, semantic_available, near_miss = None, False, None
+    else:
+        match, semantic_available, near_miss = await _semantic_denylist(text, threshold, area)
     if near_miss:
         await _log_candidate(text, near_miss, user_key, session_id, area)
     if match:

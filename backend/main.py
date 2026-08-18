@@ -15,6 +15,7 @@ cancel scopes do anyio usados pelo cliente MCP.)
 import asyncio
 import logging
 import os
+import re
 import secrets
 import time
 from collections import defaultdict, deque
@@ -25,7 +26,7 @@ from uuid import uuid4
 from bson import ObjectId
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 from pydantic import BaseModel, Field
@@ -95,6 +96,14 @@ async def lifespan(app: FastAPI):
     """Sobe o supervisor da sessão MCP. Se o MCP não subir (npx ausente, Atlas
     inacessível), o app continua no ar — só o endpoint do agente reporta o erro,
     via Banner amigável — e o supervisor segue tentando reconectar."""
+    validate_runtime_security(
+        ENVIRONMENT,
+        ADMIN_API_KEY,
+        os.getenv("JWT_SECRET", ""),
+        auth.AUTH_REQUIRED,
+        DEMO_TOKEN_ISSUANCE_ENABLED,
+        CORS_ORIGINS,
+    )
     app.state.mcp = None
     app.state.mcp_error = "sessão MCP ainda inicializando"
     stop = asyncio.Event()
@@ -130,6 +139,8 @@ app.add_middleware(
 # X-Admin-Key quando ADMIN_API_KEY está definida. Sem a env var o PoV roda em
 # modo demo aberto — com warning explícito no log, nunca silencioso.
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
+DEMO_TOKEN_ISSUANCE_ENABLED = os.getenv("DEMO_TOKEN_ISSUANCE_ENABLED", "1") == "1"
 if not ADMIN_API_KEY:
     logger.warning(
         "ADMIN_API_KEY não definida — endpoints administrativos abertos (modo demo). "
@@ -144,6 +155,26 @@ def require_admin(request: Request) -> None:
     # compare em bytes: header não-ASCII não pode virar TypeError/500
     if not secrets.compare_digest(supplied.encode(), ADMIN_API_KEY.encode()):
         raise HTTPException(status_code=401, detail="X-Admin-Key ausente ou inválida.")
+
+
+def validate_runtime_security(
+    environment: str,
+    admin_api_key: str,
+    jwt_secret: str,
+    auth_required: bool,
+    demo_token_issuance_enabled: bool,
+    cors_origins: list[str],
+) -> None:
+    if environment in {"development", "dev", "local"}:
+        return
+    if len(admin_api_key) < 24 or len(jwt_secret) < 32:
+        raise RuntimeError("ADMIN_API_KEY/JWT_SECRET inseguros fora de development")
+    if not auth_required:
+        raise RuntimeError("AUTH_REQUIRED deve permanecer ligado fora de development")
+    if demo_token_issuance_enabled:
+        raise RuntimeError("DEMO_TOKEN_ISSUANCE_ENABLED deve estar desligado fora de development")
+    if "*" in cors_origins:
+        raise RuntimeError("CORS_ORIGINS='*' é recusado fora de development")
 
 
 # Rate limit por identidade (sliding window em memória, por processo). Protege o
@@ -224,9 +255,10 @@ async def request_observability(request: Request, call_next):
 
 
 @app.get("/api/metrics")
-async def api_metrics():
+async def api_metrics(request: Request):
     """Contadores em processo: requests/erros/latência por rota + contadores de
     negócio (cache hits, bloqueios). Produção pluga OTel/Prometheus por cima."""
+    auth.resolve_user_key(request, None)
     snap = observability.metrics.snapshot()
     # Card "Economia": USD poupado pelos cache hits, estimado pelo custo médio
     # REAL das chamadas LLM desta sessão (tokens medidos, preço Sonnet 4.x:
@@ -246,6 +278,12 @@ async def api_metrics():
         snap["savings"] = {"cache_hits": c.get("cache_hits", 0),
                            "avg_llm_call_usd": 0, "estimated_saved_usd": 0}
     return snap
+
+
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics(request: Request):
+    require_admin(request)
+    return Response(observability.metrics.prometheus(), media_type="text/plain; version=0.0.4")
 
 
 @app.exception_handler(SafeQueryError)
@@ -302,6 +340,11 @@ async def health():
     }
 
 
+@app.get("/health/live")
+async def liveness():
+    return {"status": "alive"}
+
+
 # ---------- Tab 1: Flexible schema ----------
 
 @app.get("/api/templates")
@@ -318,8 +361,11 @@ async def get_template(template_id: str):
     return clean(doc)
 
 
+MODEL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$"
+
+
 class VariantBody(BaseModel):
-    model_name: str = "gemini-3-pro"
+    model_name: str = Field("gemini-3-pro", pattern=MODEL_NAME_PATTERN)
 
 
 @app.post("/api/templates/{template_id}/variant")
@@ -349,6 +395,8 @@ async def add_variant(template_id: str, body: VariantBody, request: Request):
 async def remove_variant(template_id: str, model_name: str, request: Request):
     """Demo reset: $unset the variant added live."""
     require_admin(request)
+    if not re.fullmatch(MODEL_NAME_PATTERN, model_name):
+        raise HTTPException(status_code=422, detail="model_name inválido")
     await safe_query(
         ai_brain()["prompt_templates"].update_one(
             {"_id": template_id},
@@ -466,6 +514,8 @@ class TokenBody(BaseModel):
 async def auth_token(body: TokenBody):
     """Troca uma identidade demo cadastrada por um JWT. O switcher do frontend
     é o 'login' da demo; produção substitui esta emissão por OIDC/JWKS."""
+    if not DEMO_TOKEN_ISSUANCE_ENABLED:
+        raise HTTPException(status_code=404, detail="emissão de token demo desabilitada")
     user = await profiles.require_demo_user(body.user_key)
     area = user.get("area", profiles.DEFAULT_AREA)
     area_profile = await profiles.get_area_profile(area)

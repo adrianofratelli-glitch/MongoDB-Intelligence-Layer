@@ -12,10 +12,10 @@ How it works, all in MongoDB:
   - store(): inserts the new Q&A; Atlas embeds `question` at write time.
   - Every HIT does an $inc on `hits` so the client can see reuse building up.
 
-O THRESHOLD é config viva (ai_brain.cache_config), não constante: o autoEmbed
-voyage-4 expõe o vectorSearchScore numa banda comprimida (medida neste cluster:
-~0.5014 não-relacionado → ~0.5056 texto idêntico — sim, idêntico NÃO dá 1.0).
-O ranking é confiável; a escala absoluta não é. Por isso o threshold é
+O THRESHOLD é config viva (ai_brain.cache_config), não constante. A escala do
+vectorSearchScore pode mudar quando o índice/modelo é atualizado; neste cluster,
+por exemplo, ela mudou de ~0.50 para ~0.59–0.83 em 2026-08. O ranking é
+confiável; a escala absoluta não é. Por isso o threshold é
 calibrado por medição (backend/calibrate_thresholds.py) e vive num documento
 editável — recalibrar é um update_one, não um deploy. Mesma história do
 model_config.
@@ -35,8 +35,8 @@ CACHE_PATH = "question"                # source text field for autoEmbed
 CONFIG_COLLECTION = "cache_config"     # in ai_brain — live-editable threshold/TTL
 
 # Fallback defaults quando ai_brain.cache_config não existe (seed não rodou).
-# Valores medidos em 2026-07 com calibrate_thresholds.py — ver docstring acima.
-DEFAULT_HIT_THRESHOLD = 0.504
+# Valor medido em 2026-08 com calibrate_thresholds.py — ver docstring acima.
+DEFAULT_HIT_THRESHOLD = 0.7617
 DEFAULT_TTL_SECONDS = 24 * 3600
 
 

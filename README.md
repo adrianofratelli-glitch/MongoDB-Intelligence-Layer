@@ -49,7 +49,7 @@ Each step is a real MongoDB operation, visible in the trace and the in-app inspe
 
 **What stops the agent dropping a collection.** The loop exposes only `find`, `aggregate` and one scoped `update-many`; every call is rewritten server-side before reaching MCP (order reads need a scalar `PED-...` ID and get a non-PII projection; writes can set one approved status field; session reads are bound to the caller). In production, also scope the MCP Server's Atlas user to the exact collections, or run it with `MDB_MCP_READ_ONLY=true`.
 
-> **Thresholds are measured, not guessed.** voyage-4 autoEmbed on this cluster compresses `vectorSearchScore` into a narrow band (~0.5014 unrelated → ~0.5056 for identical text — identical text does *not* score 1.0 here). Ranking is reliable, the absolute scale isn't. So no threshold is hardcoded: `ai_brain.cache_config` and `ai_brain.guardrail_policies` hold them, set by `backend/calibrate_thresholds.py` against labeled probes. Re-run it whenever the model, cluster or seed data changes.
+> **Thresholds are measured, not guessed.** The `vectorSearchScore` scale can change when the voyage-4 autoEmbed index/model is updated (this cluster moved from ~0.50 to ~0.59–0.86 in August 2026). Ranking is reliable, the absolute scale isn't. `ai_brain.cache_config` and `ai_brain.guardrail_policies` hold the live thresholds, set by `backend/calibrate_thresholds.py` against labeled probes. Re-run it whenever the model, cluster, index or seed data changes.
 
 **Hands-free pitch.** *▶ Demo automática* plays a 12-script playlist alternating cache, guardrail, memory, transactional agent and area isolation, switching the user pill live so the audience sees the same question blocked in one area and answered in another. While paused, ◀/▶ replay across already-played scripts from in-memory history — no new API calls, results exactly as they happened.
 
@@ -83,8 +83,15 @@ cd backend && .venv/bin/python -m unittest discover -s tests -v
 cd backend && .venv/bin/python seed.py                  # idempotent, resets demo data — not mid-presentation
 cd backend && .venv/bin/python calibrate_thresholds.py  # --apply writes the measured thresholds
 npm run test:visual                                     # Playwright visual regression, app running
+# Fallback reservado se :5183 estiver ocupada:
+cd frontend && npx vite --port 5283 --strictPort
+# em outro terminal: BASE_URL=http://localhost:5283 npm run test:visual
 ```
 
 Docker: `docker build -t intelligence-layer-poc . && docker run --env-file .env -p 18082:8080 intelligence-layer-poc`.
+
+## Production profile
+
+Set `ENVIRONMENT=production`, `AUTH_REQUIRED=1` and `DEMO_TOKEN_ISSUANCE_ENABLED=0`. Startup rejects weak/default JWT or admin secrets and wildcard CORS; `/metrics` requires admin authorization. Model names and update paths are allowlisted to prevent dotted/`$` field injection. The image runs as UID 10001 behind nginx with security headers.
 
 More detail in [`docs/implementation-handoff.md`](docs/implementation-handoff.md).

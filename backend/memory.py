@@ -66,6 +66,8 @@ client = AsyncAnthropic(
     api_key="dummy",
     base_url=os.getenv("ANTHROPIC_BASE_URL"),
     default_headers={"api-key": os.getenv("ANTHROPIC_API_KEY", "")},
+    timeout=float(os.getenv("ANTHROPIC_TIMEOUT_SECONDS", "45")),
+    max_retries=int(os.getenv("ANTHROPIC_MAX_RETRIES", "2")),
 )
 
 

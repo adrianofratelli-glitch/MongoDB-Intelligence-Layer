@@ -83,5 +83,15 @@ class Metrics:
             "counters": dict(sorted(self.counters.items())),
         }
 
+    def prometheus(self) -> str:
+        lines = ["# TYPE pov_uptime_seconds gauge", f"pov_uptime_seconds {time.time() - self.started_at:.3f}"]
+        for route, count in sorted(self.requests.items()):
+            label = route.replace("\\", "\\\\").replace('"', '\\"')
+            lines.extend([f'pov_http_requests_total{{route="{label}"}} {count}', f'pov_http_errors_5xx_total{{route="{label}"}} {self.errors.get(route, 0)}', f'pov_http_latency_ms_sum{{route="{label}"}} {self.latency_ms_sum[route]:.3f}', f'pov_http_latency_ms_max{{route="{label}"}} {self.latency_ms_max[route]:.3f}'])
+        for name, value in sorted(self.counters.items()):
+            label = name.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'pov_business_counter{{name="{label}"}} {value}')
+        return "\n".join(lines) + "\n"
+
 
 metrics = Metrics()
