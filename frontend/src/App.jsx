@@ -67,7 +67,8 @@ export default function App() {
   const counts = health?.counts ?? {};
 
   return (
-    <>
+    <div data-pov-shell>
+      <a className="pov-skip-link" href="#conteudo-principal">Pular para o conteúdo</a>
       <nav className="top-nav">
         <div className="nav-inner">
           <span className="nav-logo">
@@ -78,6 +79,7 @@ export default function App() {
               <button
                 key={name}
                 className={`nav-pill ${i === selected ? 'active' : ''}`}
+                aria-current={i === selected ? 'page' : undefined}
                 onClick={() => selectTab(i)}
               >
                 {name}
@@ -91,7 +93,7 @@ export default function App() {
         </div>
       </nav>
 
-      <main className="content">
+      <main id="conteudo-principal" tabIndex={-1} className="content">
         <div className="hero-kicker">POC · AI Orchestration Layer</div>
         <h1 className="page-title">
           A camada de AI vive em <span>documentos</span>
@@ -138,6 +140,6 @@ export default function App() {
       <footer className="app-footer">
         <p>MongoDB Atlas · POC.produtos_vector — autoEmbed voyage-4</p>
       </footer>
-    </>
+    </div>
   );
 }
