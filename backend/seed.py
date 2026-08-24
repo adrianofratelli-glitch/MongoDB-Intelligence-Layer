@@ -226,6 +226,64 @@ SUPPORT_ORDERS = [
             {"event": "entregue", "at": "2026-06-01T16:10:00Z"},
         ],
     },
+    # Cadeia de trocas: o MESMO Quantum 910 já foi reposto duas vezes pelo mesmo defeito.
+    # Cada elo é um pedido comum; o relacionamento é `replacement_order_id`. Só a travessia
+    # ($graphLookup, ver graph.py) mostra que a terceira troca repetiria o defeito de lote.
+    {
+        "order_id": "PED-1005",
+        "owner_user_key": "cliente-demo",
+        "customer_name": "Adriano Souza",
+        "product_name": "JBL Quantum 910 Wireless",
+        "sku": "JBL-Q910",
+        "quantity": 1,
+        "unit_price": 1299.00,
+        "status": "troca_solicitada",
+        "scenario": "troca",
+        "issue": "microfone sem captação",
+        "replacement_order_id": "PED-1006",
+        "replacement_reason": "microfone sem captação",
+        "timeline": [
+            {"event": "pedido_criado", "at": "2026-04-04T09:30:00Z"},
+            {"event": "entregue", "at": "2026-04-08T11:00:00Z"},
+            {"event": "troca_solicitada", "at": "2026-04-25T10:05:00Z"},
+        ],
+    },
+    {
+        "order_id": "PED-1006",
+        "owner_user_key": "cliente-demo",
+        "customer_name": "Adriano Souza",
+        "product_name": "JBL Quantum 910 Wireless",
+        "sku": "JBL-Q910",
+        "quantity": 1,
+        "unit_price": 1299.00,
+        "status": "troca_solicitada",
+        "scenario": "troca",
+        "issue": "mesmo defeito: microfone sem captação",
+        "replacement_order_id": "PED-1007",
+        "replacement_reason": "mesmo defeito: microfone sem captação",
+        "timeline": [
+            {"event": "pedido_criado", "at": "2026-04-27T08:15:00Z"},
+            {"event": "entregue", "at": "2026-05-02T14:20:00Z"},
+            {"event": "troca_solicitada", "at": "2026-05-30T09:40:00Z"},
+        ],
+    },
+    {
+        "order_id": "PED-1007",
+        "owner_user_key": "cliente-demo",
+        "customer_name": "Adriano Souza",
+        "product_name": "JBL Quantum 910 Wireless",
+        "sku": "JBL-Q910",
+        "quantity": 1,
+        "unit_price": 1299.00,
+        "status": "entregue",
+        "scenario": "troca",
+        "issue": "mesmo defeito: microfone sem captação",
+        "replacement_reason": "segunda reposição",
+        "timeline": [
+            {"event": "pedido_criado", "at": "2026-06-01T10:00:00Z"},
+            {"event": "entregue", "at": "2026-06-05T17:30:00Z"},
+        ],
+    },
     # ---- marina.fin (Financeiro) ----
     {
         "order_id": "PED-2001",
@@ -986,6 +1044,10 @@ def main():
     # order_id único: a query quente do agente nunca faz collection scan (o
     # filtro com owner_user_key já chega seletivo por este índice)
     poc["support_orders"].create_index("order_id", unique=True)
+    # $graphLookup casa replacement_order_id -> order_id a cada salto: sem índice em
+    # connectToField (order_id, já único acima) e no par dono+ponteiro, a travessia
+    # vira collection scan por salto.
+    poc["support_orders"].create_index([("owner_user_key", 1), ("replacement_order_id", 1)])
     # fila de near-misses do guardrail: consultada por status, ordenada por at
     poc["guardrail_candidates"].create_index([("status", 1), ("at", -1)])
     print("Índices regulares: agent_sessions (único), agent_memory, agent_traces, "

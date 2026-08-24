@@ -46,6 +46,7 @@ from agent import (
     list_agent_tools,
     mcp_server_params,
     run_agent,
+    warm_up_session,
 )
 from db import MAX_TIME_MS, SESSION_IDLE_SECONDS, SafeQueryError, ai_brain, get_client, poc, safe_query
 from llm import call_with_fallback, get_active_config
@@ -71,7 +72,12 @@ async def _mcp_supervisor(app: FastAPI, stop: asyncio.Event) -> None:
                 await session.initialize()
                 app.state.mcp = session
                 app.state.mcp_error = None
-                logger.info("sessão MongoDB MCP Server estabelecida")
+                # Antes de anunciar a sessão como pronta: aquece o caminho de aggregate,
+                # senão o primeiro turno da demo que usar catálogo ou cadeia de trocas
+                # paga ~5 s de carga sob demanda dentro do MCP Server.
+                warm_ms = await warm_up_session(session)
+                logger.info("sessão MongoDB MCP Server estabelecida (aggregate aquecido em %d ms)",
+                            int(warm_ms))
                 while not stop.is_set():
                     try:
                         await asyncio.wait_for(stop.wait(), timeout=MCP_PING_SECONDS)

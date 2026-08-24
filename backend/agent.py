@@ -26,6 +26,7 @@ import guardrails
 import memory
 import profiles
 from db import MAX_TIME_MS, poc
+from graph import build_order_chain_pipeline, summarize_order_chain
 from guidance import denial_hint, empty_order_hint, is_obviously_out_of_scope, scope_reply
 from llm import get_active_config
 
@@ -175,6 +176,31 @@ async def resolve_connection_id(session) -> str:
     return resolved
 
 
+async def warm_up_session(session) -> float:
+    """Aquece o caminho de `aggregate` do MCP Server logo depois de conectar.
+
+    Medido: a PRIMEIRA agregação de uma sessão MCP custa ~5 s; as seguintes, ~650 ms.
+    O `find` não paga isso (~260 ms, igual ao pymongo direto), então o custo é do caminho
+    de aggregate sendo carregado sob demanda dentro do servidor Node. Sem este aquecimento
+    quem paga os 5 s é o primeiro cliente da demo — seja no catálogo (`$vectorSearch`) ou
+    na cadeia de trocas (`$graphLookup`), que entram pela mesma ferramenta.
+
+    Deliberadamente inofensivo: uma agregação que casa zero documento, na própria
+    support_orders. Falha aqui nunca derruba a sessão — é otimização, não pré-requisito.
+    """
+    started = time.perf_counter()
+    try:
+        await session.call_tool("aggregate", {
+            "database": "POC", "collection": "support_orders",
+            "pipeline": [{"$match": {"order_id": "__warmup__"}}, {"$limit": 1}],
+            "connectionId": await resolve_connection_id(session),
+        })
+    except Exception as exc:  # noqa: BLE001 — aquecimento é best-effort
+        logger.warning("aquecimento do caminho de aggregate falhou (%s)", str(exc)[:200])
+        return 0.0
+    return (time.perf_counter() - started) * 1000
+
+
 def _is_empty_order_read(tool_name: str, target: str, text: str) -> bool:
     """True quando um `find` em support_orders não devolveu documento nenhum.
 
@@ -227,6 +253,26 @@ def _write_denial(tool_name: str, target: str, tool_input: dict,
     return None
 
 
+def _graph_order_id(tool_input: dict) -> str | None:
+    """Order_id escalar de dentro do pipeline que o modelo mandou.
+
+    Aceita as duas formas que o modelo alterna — o id no $match do pipeline, ou solto num
+    campo `order_id` — e ignora o resto por completo. Operadores ($in, $ne, $regex) não são
+    escalares e caem fora: um filtro amplo nunca vira ponto de partida de travessia.
+    """
+    candidate = tool_input.get("order_id")
+    if not isinstance(candidate, str):
+        pipeline = tool_input.get("pipeline")
+        stages = pipeline if isinstance(pipeline, list) else []
+        match = next((stage.get("$match") for stage in stages
+                      if isinstance(stage, dict) and isinstance(stage.get("$match"), dict)), {})
+        candidate = match.get("order_id")
+    if not isinstance(candidate, str):
+        return None
+    candidate = candidate.strip().upper()
+    return candidate if ORDER_ID_RE.fullmatch(candidate) else None
+
+
 def _read_denial(tool_name: str, target: str, tool_input: dict,
                  conversation_id: str, user_key: str) -> str | None:
     """Enforce least privilege for reads before the MCP server is called."""
@@ -258,6 +304,21 @@ def _read_denial(tool_name: str, target: str, tool_input: dict,
         return f"Leitura negada: {tool_name} não é permitido em {target}."
 
     if tool_name == "aggregate":
+        if target == "POC.support_orders":
+            # Cadeia de trocas do pedido. Único ponto onde $graphLookup é alcançável, e ele
+            # NÃO vem do modelo: extraímos só o order_id escalar do que veio e remontamos o
+            # pipeline canônico, com o dono amarrado no $match e em cada salto. Um pipeline
+            # inventado (outra collection, outro connectFromField, sem filtro de dono) morre
+            # aqui — a política é reescrita, não validação.
+            order_id = _graph_order_id(tool_input)
+            if order_id is None:
+                return ("Leitura negada: a cadeia de trocas exige um pedido específico "
+                        "(order_id no formato PED-0000).")
+            database, collection = tool_input.get("database"), tool_input.get("collection")
+            tool_input.clear()
+            tool_input.update({"database": database, "collection": collection,
+                               "pipeline": build_order_chain_pipeline(order_id, user_key)})
+            return None
         if target != "POC.produtos_vector":
             return "Leitura negada: aggregate é permitido somente no catálogo vetorial."
         pipeline = tool_input.get("pipeline")
@@ -313,6 +374,12 @@ $vectorSearch passando o texto cru em "query" (o Atlas vetoriza na hora):
   [{"$vectorSearch": {"index": "produtos_vector", "path": "descricao", \
 "query": "<texto>", "numCandidates": 100, "limit": 3}}, \
 {"$project": {"nome": 1, "preco": 1, "_id": 0}}]
+- Histórico de trocas de um pedido: use a ferramenta aggregate em "POC", \
+collection "support_orders", passando APENAS o pedido de partida:
+  [{"$match": {"order_id": "PED-0000"}}]
+O servidor monta a travessia da cadeia ($graphLookup) e devolve os sinais \
+prontos: replacements (quantas reposições), same_sku_count, recurring_defect e \
+needs_quality_review.
 
 Como agir:
 1. Antes de CADA chamada de ferramenta, escreva UMA frase curta explicando seu \
@@ -326,6 +393,15 @@ substituto. Sempre projete poucos campos e limite a 3 resultados.
 pedido com update-many em support_orders ANTES de responder ao cliente — use \
 "reembolso_solicitado", "troca_solicitada" ou "chamado_aberto", conforme o caso. \
 Para consulta de status, NÃO altere nada (apenas leia).
+4b. ANTES de prometer uma TROCA, consulte a cadeia de trocas do pedido \
+(aggregate em support_orders, ver acima). Se "needs_quality_review" vier true, \
+NÃO trate como troca de rotina: diga ao cliente, com o número de reposições, que \
+o mesmo produto já falhou repetidamente e que por isso o caso vai para análise de \
+qualidade — trocar de novo o mesmo item tende a repetir o defeito. Use o status \
+"chamado_aberto" nesse caso, e não "troca_solicitada". Se vier false, siga o \
+atendimento normal. Se o cliente apenas PERGUNTOU sobre a cadeia/histórico, sem \
+relatar falha nova nem pedir troca, informe o histórico e NÃO escreva nada — \
+abrir chamado a partir de uma pergunta cria trabalho que ninguém pediu.
 5. update-many é EXCLUSIVO para POC.support_orders. NUNCA escreva em \
 agent_memory, agent_sessions ou qualquer outra collection: a memória do cliente \
 é gerenciada automaticamente pela plataforma (o app bloqueia essas escritas).
@@ -382,6 +458,16 @@ AREA_SCENARIOS = {
             "message": (
                 "O fone do pedido PED-1004 apresentou defeito. Quero trocar por um "
                 "modelo equivalente."
+            ),
+        },
+        # Travessia de grafo: PED-1005 é a raiz de uma cadeia de reposições do MESMO SKU.
+        # O agente consulta a cadeia ANTES de prometer a troca e, vendo o padrão, abre
+        # chamado de qualidade em vez de repetir o defeito. É o cenário do $graphLookup.
+        "defeito_recorrente": {
+            "label": "🔗 Terceira troca do mesmo item",
+            "message": (
+                "O pedido PED-1005 (JBL Quantum 910) está com o microfone sem captação "
+                "de novo. Quero trocar mais uma vez."
             ),
         },
         # Cobertura de MISS: pedido que não existe — mostra o agente lidando com
@@ -598,6 +684,11 @@ DEMO_PLAYLIST = [
     {"key": "agent_reembolso", "badge": "agente", "user_key": "cliente-demo",
      "label": "Agente · solicitar reembolso",
      "message": "Quero solicitar o reembolso do pedido PED-1002, não me adaptei ao produto."},
+    # Travessia de grafo: o agente percorre a cadeia de reposições ANTES de prometer a
+    # troca, e o padrão de defeito de lote muda a decisão (chamado de qualidade, não troca).
+    {"key": "graph_cadeia", "badge": "agente", "user_key": "cliente-demo",
+     "label": "Grafo · terceira troca do mesmo item",
+     "message": "O pedido PED-1005 (JBL Quantum 910) está com o microfone sem captação de novo. Quero trocar mais uma vez."},
     {"key": "mem_recall", "badge": "memoria", "user_key": "cliente-demo",
      "label": "Memória · consolidar histórico",
      "message": "Consegue consolidar todas as perguntas que eu já fiz nesta conversa?"},
@@ -629,6 +720,33 @@ async def list_agent_tools(session: ClientSession) -> list[dict]:
             }
         )
     return tools
+
+
+def _summarize_chain_text(text: str) -> str:
+    """Converte a saída crua do $graphLookup nos sinais de negócio (ver graph.py).
+
+    Se o parse falhar, devolve o texto original: um formato inesperado do MCP não pode
+    derrubar o turno — o modelo ainda consegue ler a cadeia crua.
+    """
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        match = re.search(r"[\[{].*[\]}]", text or "", re.DOTALL)
+        if not match:
+            return text
+        try:
+            payload = json.loads(match.group(0))
+        except ValueError:
+            return text
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list):
+        return text
+    document = next((item for item in payload if isinstance(item, dict) and item.get("order_id")), None)
+    summary = summarize_order_chain(document)
+    if not summary["order_id"]:
+        return "Busca concluída: nenhum documento corresponde a esse filtro."
+    return json.dumps(summary, ensure_ascii=False)[:MAX_TOOL_RESULT_CHARS]
 
 
 def _tool_text(result) -> str:
@@ -815,6 +933,12 @@ async def _run_tool_loop(session, tools, system_static, system_dynamic, user_msg
                     result = await session.call_tool(tu.name, tool_input)
                     text = _tool_text(result)
                     is_error = bool(getattr(result, "isError", False))
+                    if tu.name == "aggregate" and target == "POC.support_orders" and not is_error:
+                        # A cadeia crua é um array aninhado; o que decide a resposta são os
+                        # sinais (quantas reposições, mesmo SKU, precisa de qualidade). Resumir
+                        # aqui, no servidor, evita gastar o orçamento de contexto com o array
+                        # e evita o modelo somar elos errado.
+                        text = _summarize_chain_text(text)
                     if _is_empty_order_read(tu.name, target, text):
                         # "Não encontrei" NÃO é falha técnica. O MCP marca busca sem
                         # resultado como isError, e o modelo reagia tentando de novo

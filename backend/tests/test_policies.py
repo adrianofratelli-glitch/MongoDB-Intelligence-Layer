@@ -1,5 +1,6 @@
 """Fast unit checks for the agent's least-privilege and context policies."""
 
+import json
 import os
 import sys
 import unittest
@@ -47,6 +48,65 @@ class ToolPolicyTests(unittest.TestCase):
         self.assertEqual(
             tool_input["update"], {"$set": {"status": "reembolso_solicitado"}}
         )
+
+    def test_graph_pipeline_is_rebuilt_server_side_and_bound_to_owner(self):
+        # O modelo manda um $graphLookup inventado, apontando para outra collection e sem
+        # filtro de dono. Nada disso sobrevive: o servidor remonta o pipeline inteiro.
+        tool_input = {
+            "database": "POC", "collection": "support_orders",
+            "pipeline": [
+                {"$match": {"order_id": "PED-1005"}},
+                {"$graphLookup": {"from": "app_users", "startWith": "$owner_user_key",
+                                  "connectFromField": "owner_user_key",
+                                  "connectToField": "_id", "as": "leak", "maxDepth": 50}},
+            ],
+        }
+        self.assertIsNone(
+            agent._read_denial("aggregate", "POC.support_orders", tool_input, "conv", "user")
+        )
+        pipeline = tool_input["pipeline"]
+        self.assertEqual(pipeline[0]["$match"],
+                         {"order_id": "PED-1005", "owner_user_key": "user"})
+        lookup = pipeline[1]["$graphLookup"]
+        self.assertEqual(lookup["from"], "support_orders")
+        self.assertEqual(lookup["connectFromField"], "replacement_order_id")
+        self.assertEqual(lookup["restrictSearchWithMatch"], {"owner_user_key": "user"})
+        self.assertLessEqual(lookup["maxDepth"], 6)
+        # customer_name não pode voltar nem na raiz nem nos elos da cadeia.
+        projected = pipeline[2]["$project"]
+        self.assertNotIn("customer_name", projected)
+        self.assertNotIn("customer_name", projected["chain"]["$map"]["in"])
+
+    def test_graph_traversal_requires_a_scalar_starting_order(self):
+        for bad in (
+            {"pipeline": [{"$match": {"order_id": {"$ne": None}}}]},
+            {"pipeline": [{"$match": {"owner_user_key": "outro"}}]},
+            {"pipeline": []},
+            {"order_id": "PED-XX"},
+        ):
+            with self.subTest(bad=bad):
+                self.assertIsNotNone(
+                    agent._read_denial("aggregate", "POC.support_orders", bad, "conv", "user")
+                )
+
+    def test_chain_summary_replaces_raw_traversal_output(self):
+        raw = json.dumps([{
+            "order_id": "PED-1005", "product_name": "JBL Quantum 910 Wireless",
+            "sku": "JBL-Q910", "status": "troca_solicitada",
+            "chain": [
+                {"order_id": "PED-1006", "sku": "JBL-Q910", "depth": 0, "reason": "mic"},
+                {"order_id": "PED-1007", "sku": "JBL-Q910", "depth": 1, "reason": "mic"},
+            ],
+        }])
+        summary = json.loads(agent._summarize_chain_text(raw))
+        self.assertEqual(summary["replacements"], 2)
+        self.assertEqual(summary["same_sku_count"], 3)
+        self.assertTrue(summary["recurring_defect"])
+        self.assertTrue(summary["needs_quality_review"])
+        self.assertEqual(summary["path"], ["PED-1005", "PED-1006", "PED-1007"])
+
+    def test_chain_summary_survives_unparseable_tool_output(self):
+        self.assertEqual(agent._summarize_chain_text("MCP caiu"), "MCP caiu")
 
     def test_catalog_pipeline_is_replaced_with_safe_shape(self):
         tool_input = {
