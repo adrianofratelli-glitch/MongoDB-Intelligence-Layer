@@ -3,6 +3,21 @@
 > Terceiro dos três prompts. O argumento só fecha se a tela mostrar configuração mudando ao vivo, sem redeploy. Toda a estratégia do frontend sai daí.
 
 ---
+## Contrato visual do portfólio (v2)
+
+Esta UI participa da assinatura MongoDB Dark das PoVs. O arquivo
+`src/pov-signature.css` é uma cópia sincronizada entre os dez frontends e deve
+ser importado **depois** do stylesheet local. O contêiner raiz carrega
+`data-pov-shell`, existe um `.pov-skip-link` para `#conteudo-principal` e o
+`index.html` declara pt-BR, dark color scheme, theme color e o favicon comum.
+
+A camada compartilhada é dona da document rail, foco, touch targets e redução de
+movimento. Este arquivo continua dono do fluxo e das exceções de domínio: não
+achate uma tela operacional num template de landing page e não remova a tese
+visual específica desta PoV. Qualquer mudança na assinatura precisa ser
+replicada nas dez cópias e validada em 1440, 768 e 360 px, além do build de
+produção e do estado offline.
+
 
 ## Regra que vale pra tudo
 
@@ -38,7 +53,11 @@ Põe um **flash visual** na aba 1 marcando o instante em que o documento muda. S
 
 Na aba 3, a chamada que o modelo pediu e a versão **reescrita** aparecem lado a lado. É a prova de que a allowlist não é decorativa.
 
-Componentes de apoio: um `JsonViewer` (documento cru formatado — é o que sustenta "polimórfico" como afirmação verificável) e um `PipelineSteps` (as etapas do turno em ordem, transformando o pipeline em imagem).
+Componentes de apoio: um `JsonViewer` (documento cru formatado — é o que sustenta "polimórfico" como afirmação verificável), um `PipelineSteps` (as etapas do turno em ordem, transformando o pipeline em imagem) e um `ReplacementChain`.
+
+O `ReplacementChain` só aparece quando a travessia de grafo rodou no turno: ele procura no trace a chamada `aggregate` cujo pipeline contém `$graphLookup`, e desenha a corrente `PED-1005 → PED-1006 → PED-1007`, com os contadores e o veredito. É o painel que explica visualmente por que a resposta mudou — nenhum documento sozinho diz "é a terceira unidade do mesmo SKU". Ele lê `visible`, não `events`, então respeita o replay passo a passo e o Tour guiado: aparece no momento em que a travessia acontece, não antes.
+
+**O badge da coluna MongoDB mostra o estágio, não o nome da ferramenta MCP.** "aggregate" cobre tanto a busca vetorial do catálogo quanto a travessia da cadeia, e na tela as duas ficavam indistinguíveis — o cliente via "aggregate, aggregate" e perdia o argumento. O `opLabel` deriva o rótulo (`$vectorSearch` / `$graphLookup`) do pipeline que o **servidor** montou, não do nome da collection: se a reescrita mudar, o rótulo muda junto, em vez de mentir.
 
 ## O switcher de identidade é o login da demo
 
