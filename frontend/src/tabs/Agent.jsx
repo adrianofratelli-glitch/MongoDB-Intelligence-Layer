@@ -4,6 +4,7 @@ import Banner from '@leafygreen-ui/banner';
 import Button from '@leafygreen-ui/button';
 import TextInput from '@leafygreen-ui/text-input';
 import { api } from '../api.js';
+import ReplacementChain from '../components/ReplacementChain.jsx';
 
 // As 6 fases do loop agêntico (mesma narrativa do Perceive→Reason→Act→Store).
 const PHASES = [
@@ -32,6 +33,21 @@ const short = (obj, n = 160) => {
 };
 
 const opTarget = (args = {}) => `${args.database ?? '?'}.${args.collection ?? '?'}`;
+// O nome da ferramenta MCP ("aggregate") cobre tanto a busca vetorial do catálogo quanto a
+// travessia da cadeia de trocas. O estágio real vem do pipeline que o servidor montou, então
+// o rótulo é derivado do que foi de fato enviado — não de um palpite pelo nome da collection.
+const STAGE_LABELS = { $vectorSearch: '$vectorSearch', $graphLookup: '$graphLookup' };
+const opLabel = (event = {}) => {
+  const stages = event.args?.pipeline;
+  if (Array.isArray(stages)) {
+    for (const stage of stages) {
+      for (const key of Object.keys(stage || {})) {
+        if (STAGE_LABELS[key]) return STAGE_LABELS[key];
+      }
+    }
+  }
+  return event.tool;
+};
 const opDetail = (args = {}) => {
   if (args.pipeline) return short(args.pipeline, 200);
   if (args.filter) return 'filter: ' + short(args.filter, 140);
@@ -540,6 +556,9 @@ export default function Agent({ state, setState }) {
         {/* flags das features de inteligência (cache / guardrails / memória) */}
         {run && <FeatureFlags run={run} />}
 
+        {/* cadeia de trocas: só aparece quando a travessia de grafo rodou neste turno */}
+        <ReplacementChain events={visible} />
+
         {/* inspetor das collections do MongoDB */}
         {showInspector && <MongoInspector userKey={user.user_key} area={user.area} conversationId={conversationId} run={run} />}
 
@@ -551,7 +570,7 @@ export default function Agent({ state, setState }) {
             {ops.map((e, i) => (
               <div key={i} className={`op-item ${e.phase === 'act' || e.phase === 'store' ? 'write' : 'read'} ${current === e ? 'pulse' : ''}`}>
                 <div className="op-head">
-                  <Badge variant={e.phase === 'act' || e.phase === 'store' ? 'yellow' : 'green'}>{e.tool}</Badge>
+                  <Badge variant={e.phase === 'act' || e.phase === 'store' ? 'yellow' : 'green'}>{opLabel(e)}</Badge>
                   <span className="mono dim">{opTarget(e.args)}</span>
                   {e.latency_ms != null && <span className="mono dim">{e.latency_ms} ms</span>}
                 </div>

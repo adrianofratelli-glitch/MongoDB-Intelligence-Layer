@@ -15,6 +15,7 @@
   --orange: #ffc010;
   --cyan: #0498ec;
   --teal: #00a35c;
+  --danger: #ff6960;
   --font-sans: 'Outfit', 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   color-scheme: dark;
@@ -1147,4 +1148,41 @@ footer.app-footer p {
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+
+/* ---------------------------------------------------------------------------
+   Cadeia de trocas ($graphLookup)
+   A corrente de pedidos é o único jeito de mostrar numa tela por que a resposta
+   mudou: nenhum documento sozinho diz "é a terceira unidade do mesmo item".
+   --------------------------------------------------------------------------- */
+.chain-panel { margin: 0 0 1rem; padding: 0.9rem 1rem; background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 12px; }
+.chain-panel.chain-alert { border-color: rgba(255, 105, 96, 0.45); }
+.chain-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border-subtle); color: var(--text-muted); font: 600 9.5px var(--font-mono); text-transform: uppercase; letter-spacing: 0.1em; }
+.chain-head code { color: var(--text-sec); }
+.chain-track { list-style: none; display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px; margin: 12px 0 14px; padding: 0; }
+.chain-node { display: flex; align-items: center; gap: 6px; }
+.chain-link { display: inline-flex; align-items: center; gap: 4px; color: var(--text-muted); font: 600 8.5px var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; padding: 0 2px; }
+.chain-link i { display: block; width: 12px; height: 1px; background: var(--border-subtle); }
+.chain-pill { display: flex; flex-direction: column; gap: 2px; min-width: 108px; padding: 8px 12px; background: var(--bg-primary); border: 1px solid var(--border-subtle); border-radius: 10px; }
+.chain-pill code { color: var(--text-pri); font-size: 11.5px; }
+.chain-pill small { color: var(--text-muted); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+.chain-pill.origin { border-color: var(--border-accent); }
+.chain-pill.current { border-color: rgba(4, 152, 236, 0.45); }
+.chain-signals { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.chain-signal { padding: 10px 12px; background: var(--bg-primary); border: 1px solid var(--border-subtle); border-radius: 10px; }
+.chain-signal strong { display: block; color: var(--text-pri); font-size: 20px; font-variant-numeric: tabular-nums; }
+.chain-signal strong.sku { font: 600 13px var(--font-mono); }
+.chain-signal span { color: var(--text-muted); font-size: 10.5px; }
+.chain-verdict { display: flex; gap: 8px; align-items: flex-start; margin: 0 0 10px; padding: 10px 12px; border-radius: 10px; font-size: 0.82rem; line-height: 1.5; }
+.chain-verdict.alert { background: rgba(255, 105, 96, 0.1); color: var(--text-pri); border: 1px solid rgba(255, 105, 96, 0.3); }
+.chain-verdict.ok { background: var(--accent-glow); color: var(--text-pri); border: 1px solid var(--border-accent); }
+.chain-footnote { margin: 0; color: var(--text-muted); font-size: 0.72rem; line-height: 1.55; }
+.chain-footnote code { color: var(--text-sec); }
+
+@media (max-width: 720px) {
+  .chain-track { flex-direction: column; align-items: stretch; }
+  .chain-node { flex-direction: column; align-items: stretch; }
+  .chain-link { justify-content: center; }
+  .chain-link i { width: 1px; height: 10px; }
 }
