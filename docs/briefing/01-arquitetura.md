@@ -1,6 +1,6 @@
 # Intelligence Layer — arquitetura e princípios
 
-> Primeiro dos três prompts que eu uso pra levantar essa PoV do zero. A tese, o pipeline por turno e os invariantes que não se relaxam. Coleções, índices e limiares em `02-mongodb.md`; tela e roteiro em `03-interface-fluxos.md`.
+> Primeira das três partes do briefing desta PoV. A tese, o pipeline por turno e os invariantes que não se relaxam. Coleções, índices e limiares em `02-mongodb.md`; tela e roteiro em `03-interface-fluxos.md`.
 
 ---
 

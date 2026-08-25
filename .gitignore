@@ -31,3 +31,8 @@ test-results/
 playwright-report/
 graphify-out/
 CLAUDE.md 
+
+# Instruções locais de ferramenta — não versionar
+CLAUDE.md
+AGENTS.md
+.claude/

@@ -2,16 +2,6 @@ import { useEffect, useState } from 'react';
 import Badge from '@leafygreen-ui/badge';
 import Banner from '@leafygreen-ui/banner';
 import Button from '@leafygreen-ui/button';
-import Code from '@leafygreen-ui/code';
-import {
-  Table,
-  TableHead,
-  HeaderRow,
-  HeaderCell,
-  TableBody,
-  Row,
-  Cell,
-} from '@leafygreen-ui/table';
 import JsonViewer from '../components/JsonViewer.jsx';
 import { api } from '../api.js';
 
@@ -220,30 +210,9 @@ export default function FlexibleSchema({ state, setState }) {
         </Banner>
       )}
 
-      <div className="two-col">
-        <div className="card alt">
+      <div className="card schema-stage">
           <div className="card-header">
-            <span className="card-title">PostgreSQL</span>
-            <Badge variant="red">migration + deploy + downtime</Badge>
-          </div>
-          <Code language="sql" darkMode copyable={false}>
-            {POSTGRES_DDL}
-          </Code>
-          <div className="spacer" style={{ height: 12 }} />
-          <Code language="sql" darkMode copyable={false}>
-            {POSTGRES_MIGRATION}
-          </Code>
-          <p className="dim" style={{ marginTop: 12, marginBottom: 0, fontSize: '0.8rem' }}>
-            "E se usarmos JSONB pra tudo?" — aí o schema virou documento <em>sem</em> as
-            ferramentas de documento: sem índice em qualquer caminho aninhado, sem query
-            tipada dentro de arrays, sem Search/Vector sobre o mesmo dado, sem change
-            streams. É um banco de documentos sem o tooling de um.
-          </p>
-        </div>
-
-        <div className="card">
-          <div className="card-header">
-            <span className="card-title">MongoDB — documento real, ao vivo do Atlas</span>
+            <span className="card-title">Documento ao vivo no Atlas</span>
             <span style={{ whiteSpace: 'nowrap' }}><Badge variant="green">1 update, zero migration</Badge></span>
           </div>
           <div className="row" style={{ marginBottom: 12 }}>
@@ -265,40 +234,12 @@ export default function FlexibleSchema({ state, setState }) {
           ) : (
             <div className="dim">carregando documento…</div>
           )}
-        </div>
       </div>
 
-      <div className="card">
-        <div className="card-title" style={{ marginBottom: 12 }}>
-          Mesmo concern, dois mundos
-        </div>
-        <Table darkMode>
-          <TableHead>
-            <HeaderRow>
-              <HeaderCell>Concern</HeaderCell>
-              <HeaderCell>PostgreSQL (relacional)</HeaderCell>
-              <HeaderCell>MongoDB (documentos)</HeaderCell>
-            </HeaderRow>
-          </TableHead>
-          <TableBody>
-            {CONCERNS.map((r) => (
-              <Row key={r.concern}>
-                <Cell>{r.concern}</Cell>
-                <Cell>
-                  <span style={{ color: 'var(--mdb-red)' }}>{r.pg}</span>
-                </Cell>
-                <Cell>
-                  <span style={{ color: 'var(--mdb-green)' }} className="mono">
-                    {r.mdb}
-                  </span>
-                </Cell>
-              </Row>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-
-      <FlowRace />
+      <details className="card secondary-comparison">
+        <summary>Contraste relacional</summary>
+        <p className="dim">No modelo relacional, uma variante estrutural nova exige migration e coordenação de deploy. Aqui, a mudança é o próprio <code>$set</code> demonstrado acima.</p>
+      </details>
     </div>
   );
 }

@@ -6,9 +6,9 @@ const ModelSwap = lazy(() => import('./tabs/ModelSwap.jsx'));
 const Agent = lazy(() => import('./tabs/Agent.jsx'));
 
 const TABS = [
-  '01 · Schema Flexível',
-  '02 · Model Swap & Custo',
-  '03 · Agente',
+  'Schema ao vivo',
+  'Modelo e custo',
+  'Agente',
 ];
 
 export default function App() {
@@ -94,39 +94,10 @@ export default function App() {
       </nav>
 
       <main id="conteudo-principal" tabIndex={-1} className="content">
-        <div className="hero-kicker">POC · AI Orchestration Layer</div>
-        <h1 className="page-title">
-          A camada de AI vive em <span>documentos</span>
-        </h1>
-        <p className="page-subtitle">
-          Schema de prompts, configuração de modelos e a memória de um agente
-          autônomo vivem como documentos — e evoluem com um simples update.
-        </p>
-
-        <div className="stat-bar">
-          <div className="stat-item">
-            <div className="stat-val accent">{counts.prompt_templates ?? '—'}</div>
-            <div className="stat-label">prompt_templates</div>
-          </div>
-          <div className="stat-item">
-            <div className="stat-val accent">{counts.model_config ?? '—'}</div>
-            <div className="stat-label">model_config</div>
-          </div>
-          <div className="stat-item">
-            <div className="stat-val accent">{counts.support_orders ?? '—'}</div>
-            <div className="stat-label">support_orders</div>
-          </div>
-          <div className="stat-item">
-            <div className="stat-val">200K</div>
-            <div className="stat-label">produtos vetorizados</div>
-          </div>
-          <div className="stat-item">
-            <div className="stat-val" style={{ fontSize: '1rem', lineHeight: '1.9' }}>
-              {health?.primary_model ?? '—'}
-            </div>
-            <div className="stat-label">modelo primário ativo</div>
-          </div>
-        </div>
+        <header className="stage-heading">
+          <h1 className="page-title">Inteligência como <span>documento</span></h1>
+          <p>{counts.support_orders ?? '—'} pedidos · {health?.primary_model ?? 'modelo conectando'}</p>
+        </header>
 
         {panes.map((pane, i) => visited.has(i) && (
           <div key={i} style={{ display: i === selected ? 'block' : 'none' }}>
@@ -137,9 +108,6 @@ export default function App() {
         ))}
       </main>
 
-      <footer className="app-footer">
-        <p>MongoDB Atlas · POC.produtos_vector — autoEmbed voyage-4</p>
-      </footer>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 # Intelligence Layer — MongoDB: coleções, índices, embeddings e queries
 
-> Segundo dos três prompts. Aqui está tudo que toca o Atlas: as coleções dos dois databases, cada definição de índice, a estratégia de embedding e **todas as queries que a PoV executa**, com o pipeline colado e o motivo de cada parâmetro.
+> Segunda parte do briefing. Aqui está tudo que toca o Atlas: as coleções dos dois databases, cada definição de índice, a estratégia de embedding e **todas as queries que a PoV executa**, com o pipeline colado e o motivo de cada parâmetro.
 >
 > É o arquivo mais longo dos três de propósito: se "a memória do agente é uma query" é a tese, a query precisa estar escrita.
 

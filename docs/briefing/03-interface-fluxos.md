@@ -1,8 +1,16 @@
 # Intelligence Layer — interface, fluxos e roteiro
 
-> Terceiro dos três prompts. O argumento só fecha se a tela mostrar configuração mudando ao vivo, sem redeploy. Toda a estratégia do frontend sai daí.
+> Terceira parte do briefing. O argumento só fecha se a tela mostrar configuração mudando ao vivo, sem redeploy. Toda a estratégia do frontend sai daí.
 
 ---
+## Estado atual — modo palco
+
+As três abas permanecem, com rótulos curtos: **Schema ao vivo**, **Modelo e
+custo** e **Agente**. A primeira abre diretamente no documento MongoDB mutável;
+o DDL relacional virou um contraste recolhido. O shell não exibe hero longo,
+barra de estatísticas nem rodapé. Os contratos técnicos abaixo continuam
+válidos, mas não definem densidade visual.
+
 ## Contrato visual do portfólio (v2)
 
 Esta UI participa da assinatura MongoDB Dark das PoVs. O arquivo
