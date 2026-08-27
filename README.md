@@ -94,4 +94,3 @@ Docker: `docker build -t intelligence-layer-poc . && docker run --env-file .env 
 
 Defina `ENVIRONMENT=production`, `AUTH_REQUIRED=1` e `DEMO_TOKEN_ISSUANCE_ENABLED=0`. A inicialização rejeita segredos de JWT ou admin fracos/padrão e CORS com curinga; o `/metrics` exige autorização de admin. Nomes de modelo e caminhos de update passam por allowlist para evitar injeção de campos com ponto ou `$`. A imagem roda como UID 10001 atrás do nginx com cabeçalhos de segurança.
 
-Mais detalhes em [`docs/implementation-handoff.md`](docs/implementation-handoff.md).
