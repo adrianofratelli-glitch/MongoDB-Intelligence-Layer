@@ -76,6 +76,57 @@ export const api = {
   agentTools: () => request('/api/agent/tools'),
   agentRun: (body) =>
     request('/api/agent/run', { method: 'POST', body: JSON.stringify(body) }),
+  // Streaming (SSE) do mesmo turno: `onTrace(event)` é chamado incrementalmente
+  // a cada passo (Perceive/Retrieve/Reason/Act/Store/Loop) conforme o backend
+  // os gera, em vez de só no final. Resolve com o `result` final (mesmo shape
+  // de agentRun) quando o turno termina.
+  agentRunStream: async (body, onTrace) => {
+    let res;
+    try {
+      res = await fetch('/api/agent/run/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify(body),
+      });
+    } catch {
+      throw new ApiError('rede', 'Backend não respondeu. O FastAPI está rodando na porta 8010?');
+    }
+    if (!res.ok || !res.body) {
+      const errBody = await res.json().catch(() => ({}));
+      const err = errBody.error || {};
+      throw new ApiError(err.kind || 'erro', err.message || errBody.detail || `Erro HTTP ${res.status}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // Eventos SSE separados por linha em branco; cada bloco tem "event: x\ndata: {...}"
+      let sep;
+      while ((sep = buffer.indexOf('\n\n')) !== -1) {
+        const block = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        const eventLine = block.split('\n').find((l) => l.startsWith('event: '));
+        const dataLine = block.split('\n').find((l) => l.startsWith('data: '));
+        if (!eventLine || !dataLine) continue;
+        const eventName = eventLine.slice('event: '.length);
+        const data = JSON.parse(dataLine.slice('data: '.length));
+        if (eventName === 'trace') {
+          onTrace?.(data);
+        } else if (eventName === 'result') {
+          return data;
+        } else if (eventName === 'error') {
+          throw new ApiError(data.kind || 'erro', data.message || 'Falha ao executar o agente.');
+        }
+      }
+    }
+    throw new ApiError('rede', 'Conexão de streaming encerrada sem resultado.');
+  },
 
   // Intelligence features — cache, memory, guardrails (inspect / reset)
   cacheInspect: () => request('/api/cache'),

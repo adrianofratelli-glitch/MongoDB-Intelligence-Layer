@@ -176,6 +176,13 @@ async def resolve_connection_id(session) -> str:
     return resolved
 
 
+def forget_connection_id(session) -> None:
+    """Limpa a entrada de `_CONNECTION_IDS` de uma sessão que saiu do pool
+    (reconexão/health-check substituiu-a) — sem isso o dict cresce sem limite
+    a cada ciclo de reconexão."""
+    _CONNECTION_IDS.pop(id(session), None)
+
+
 async def warm_up_session(session) -> float:
     """Aquece o caminho de `aggregate` do MCP Server logo depois de conectar.
 
@@ -695,12 +702,20 @@ DEMO_PLAYLIST = [
 ]
 
 
+# Versão fixada deliberadamente: sem pin, a mesma PoV roda com pacotes
+# diferentes em dev/demo/apresentação ao cliente, com comportamento diferente
+# e nenhum aviso. Verificada com `npx mongodb-mcp-server --version` em
+# 2026-09-02; ALLOWED_TOOLS e o teste de contrato (tests/test_mcp_contract.py)
+# assumem esta versão. Reavalie ambos antes de subir o pin.
+MCP_SERVER_VERSION = os.getenv("MCP_SERVER_VERSION", "2.1.0")
+
+
 def mcp_server_params() -> StdioServerParameters:
     """Stdio parameters to launch the MongoDB MCP Server bound to our Atlas URI."""
     uri = os.environ["MONGODB_URI"]
     return StdioServerParameters(
         command="npx",
-        args=["-y", "mongodb-mcp-server"],
+        args=["-y", f"mongodb-mcp-server@{MCP_SERVER_VERSION}"],
         env={**os.environ, "MDB_MCP_CONNECTION_STRING": uri},
     )
 
@@ -1122,6 +1137,7 @@ async def run_agent(
     message: str | None,
     conversation_id: str,
     user_key: str = DEFAULT_USER_KEY,
+    on_event=None,
 ) -> dict:
     """Run one real agentic turn through the full intelligence pipeline.
 
@@ -1168,7 +1184,16 @@ async def run_agent(
         },
     }
     def emit(phase, kind, **fields):
-        trace.append({"phase": phase, "kind": kind, **fields})
+        event = {"phase": phase, "kind": kind, **fields}
+        trace.append(event)
+        # Streaming (SSE) opcional: quando o chamador (main.py) passa on_event,
+        # cada evento do trace é entregue ao cliente HTTP incrementalmente,
+        # em vez de esperar o turno inteiro (até 120s) para ver qualquer coisa.
+        if on_event is not None:
+            try:
+                on_event(event)
+            except Exception:  # noqa: BLE001 — falha no streaming nunca derruba o turno
+                logger.exception("on_event falhou (streaming) — turno continua")
 
     # ---- Identity → area profile (persona + which policies apply) -------------
     # Who is talking decides which AREA rules the whole turn: persona in the

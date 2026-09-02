@@ -87,6 +87,23 @@ function persistConvMap(map) {
   }
 }
 
+// Rótulo curto pro indicador de progresso ao vivo (SSE) — traduz phase/kind
+// em algo que um cliente na demo entende, sem esperar o turno inteiro (até 120s).
+function describeLiveEvent(event) {
+  if (event.kind === 'tool_call') return `chamando ferramenta ${event.tool ?? '?'}...`;
+  if (event.kind === 'guardrail') return `verificando guardrails (${event.stage ?? '?'})...`;
+  if (event.kind === 'reasoning') return 'processando resposta...';
+  const byPhase = {
+    perceive: 'lendo a mensagem...',
+    retrieve: 'consultando o MongoDB...',
+    reason: 'raciocinando...',
+    act: 'preparando a resposta...',
+    store: 'salvando na memória...',
+    loop: 'concluindo o turno...',
+  };
+  return byPhase[event.phase] ?? 'processando...';
+}
+
 export default function Agent({ state, setState }) {
   const { run, step, iteration, conversationId, turns = [] } = state;
   const [scenarios, setScenarios] = useState([]);
@@ -95,6 +112,7 @@ export default function Agent({ state, setState }) {
   const [user, setUser] = useState(FALLBACK_USER);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  const [liveStatus, setLiveStatus] = useState(null); // streaming: passo em andamento, em vez de loading genérico
   const [error, setError] = useState(null);
   const [playing, setPlaying] = useState(false);
   const [walk, setWalk] = useState(false);
@@ -291,11 +309,15 @@ export default function Agent({ state, setState }) {
     setError(null);
     setPlaying(false);
     setWalk(false);
+    setLiveStatus('iniciando...');
     const convId =
       (switched ? convMapRef.current[target.user_key]
                 : conversationId ?? convMapRef.current[target.user_key]) ?? null;
     try {
-      const result = await api.agentRun({ ...payload, conversation_id: convId, user_key: target.user_key });
+      const result = await api.agentRunStream(
+        { ...payload, conversation_id: convId, user_key: target.user_key },
+        (event) => setLiveStatus(describeLiveEvent(event)),
+      );
       const finalConvId = result.conversation_id ?? convId;
       convMapRef.current[target.user_key] = finalConvId;
       persistConvMap(convMapRef.current);
@@ -326,6 +348,7 @@ export default function Agent({ state, setState }) {
       setDemo({ active: false, idx: -1, paused: false }); // interrompe a demo se um script falhar
     } finally {
       setBusy(false);
+      setLiveStatus(null);
     }
   };
 
@@ -613,7 +636,7 @@ export default function Agent({ state, setState }) {
                 <div key={i} className={`chat-msg ${t.role === 'user' ? 'user' : 'assistant'}`}>{t.text}</div>
               ))}
               {busy && (
-                <div className="row"><div className="spinner" /> <span className="dim">o agente está trabalhando…</span></div>
+                <div className="row"><div className="spinner" /> <span className="dim">{liveStatus ?? 'o agente está trabalhando…'}</span></div>
               )}
             </div>
             <div className="row" style={{ marginTop: 10 }}>

@@ -240,11 +240,45 @@ class RateLimitTests(unittest.TestCase):
             self.main.enforce_rate_limit("id-a")
         self.main.enforce_rate_limit("id-b")  # não levanta
 
-    def test_empty_windows_are_pruned(self):
+    def test_own_window_is_pruned_passively(self):
+        # enforce_rate_limit só poda a janela DA IDENTIDADE atual (O(1) amortizado) —
+        # não faz mais scan de todas as identidades a cada request.
+        import time as _time
+        self.main._rate_windows["id-a"].append(_time.monotonic() - 120)
+        self.main.enforce_rate_limit("id-a")
+        # o timestamp expirado (>60s) saiu da própria janela; só o novo ficou
+        self.assertEqual(len(self.main._rate_windows["id-a"]), 1)
+
+    def test_enforce_rate_limit_never_touches_other_identities(self):
+        # ao contrário do scan antigo, uma chamada para "fresh" não mexe na
+        # janela de "stale" — a limpeza de identidades inativas é responsabilidade
+        # exclusiva da tarefa periódica em background (_rate_windows_janitor).
         import time as _time
         self.main._rate_windows["stale"].append(_time.monotonic() - 120)
         self.main.enforce_rate_limit("fresh")
+        self.assertIn("stale", self.main._rate_windows)
+
+    def test_janitor_prunes_dead_identities(self):
+        import asyncio
+        import time as _time
+
+        async def run_one_pass():
+            stop = asyncio.Event()
+            self.main._rate_windows["stale"].append(_time.monotonic() - 120)
+            self.main._rate_windows["fresh"].append(_time.monotonic())
+            orig = self.main.RATE_WINDOWS_JANITOR_SECONDS
+            self.main.RATE_WINDOWS_JANITOR_SECONDS = 0
+            try:
+                task = asyncio.create_task(self.main._rate_windows_janitor(stop))
+                await asyncio.sleep(0.05)
+                stop.set()
+                await task
+            finally:
+                self.main.RATE_WINDOWS_JANITOR_SECONDS = orig
+
+        asyncio.run(run_one_pass())
         self.assertNotIn("stale", self.main._rate_windows)
+        self.assertIn("fresh", self.main._rate_windows)
 
 
 class RuntimeSecurityTests(unittest.TestCase):

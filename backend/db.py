@@ -52,6 +52,15 @@ def get_client() -> AsyncMongoClient:
             serverSelectionTimeoutMS=MAX_TIME_MS,
             connectTimeoutMS=MAX_TIME_MS,
             appname="intelligence-layer-poc",
+            # Explícito em vez de default do driver: número real de referência
+            # para dimensionamento (ver CLAUDE.md). Tier de referência desta PoV
+            # é M10/M20 — maxPoolSize=50 cobre concorrência de demo/apresentação
+            # com folga sem pressionar o connection limit do cluster;
+            # minPoolSize evita reabrir handshake TLS a cada rajada após um
+            # período ocioso; maxIdleTimeMS libera conexões extras entre demos.
+            maxPoolSize=int(os.getenv("MONGODB_MAX_POOL_SIZE", "50")),
+            minPoolSize=int(os.getenv("MONGODB_MIN_POOL_SIZE", "5")),
+            maxIdleTimeMS=int(os.getenv("MONGODB_MAX_IDLE_TIME_MS", "30000")),
         )
     return _client
 

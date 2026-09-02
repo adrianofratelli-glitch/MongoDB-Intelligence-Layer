@@ -13,6 +13,8 @@ cancel scopes do anyio usados pelo cliente MCP.)
 """
 
 import asyncio
+import itertools
+import json
 import logging
 import os
 import re
@@ -26,7 +28,7 @@ from uuid import uuid4
 from bson import ObjectId
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 from pydantic import BaseModel, Field
@@ -43,6 +45,7 @@ from agent import (
     AREA_SCENARIOS,
     DEMO_PLAYLIST,
     WRITE_TOOLS,
+    forget_connection_id,
     list_agent_tools,
     mcp_server_params,
     run_agent,
@@ -54,48 +57,76 @@ from llm import call_with_fallback, get_active_config
 observability.setup_logging()
 logger = logging.getLogger("poc.main")
 
-MCP_PING_SECONDS = 30      # intervalo do health-check da sessão MCP
-MCP_RETRY_SECONDS = 5      # backoff entre tentativas de reconexão
+MCP_PING_SECONDS = 30      # intervalo do health-check de cada sessão MCP
+MCP_RETRY_SECONDS = 5      # backoff entre tentativas de reconexão de UM slot
+
+# Pool de sessões MCP: uma sessão stdio única serializava TODO o backend — toda
+# call_tool concorrente esperava na mesma pipe, e um subprocess travado derrubava
+# TODOS os requests em voo de uma vez. N subprocessos independentes, cada um com
+# seu próprio supervisor de reconexão, distribuídos por round-robin.
+MCP_POOL_SIZE = max(1, int(os.getenv("MCP_POOL_SIZE", "3")))
 
 
-async def _mcp_supervisor(app: FastAPI, stop: asyncio.Event) -> None:
-    """Dona do ciclo de vida da sessão MCP: abre, monitora (ping), reconecta.
+async def _mcp_supervisor(app: FastAPI, stop: asyncio.Event, slot: int) -> None:
+    """Dona do ciclo de vida de UMA sessão MCP do pool (índice `slot`): abre,
+    monitora (ping), reconecta — sem afetar as outras sessões do pool.
 
     Tudo acontece nesta task — o stdio_client usa cancel scopes do anyio que
     não podem ser abertos numa task e fechados em outra.
     """
     while not stop.is_set():
+        session = None
         try:
             async with AsyncExitStack() as stack:
                 read, write = await stack.enter_async_context(stdio_client(mcp_server_params()))
                 session = await stack.enter_async_context(ClientSession(read, write))
                 await session.initialize()
-                app.state.mcp = session
-                app.state.mcp_error = None
+                app.state.mcp_pool[slot] = session
+                app.state.mcp_errors[slot] = None
                 # Antes de anunciar a sessão como pronta: aquece o caminho de aggregate,
                 # senão o primeiro turno da demo que usar catálogo ou cadeia de trocas
                 # paga ~5 s de carga sob demanda dentro do MCP Server.
                 warm_ms = await warm_up_session(session)
-                logger.info("sessão MongoDB MCP Server estabelecida (aggregate aquecido em %d ms)",
-                            int(warm_ms))
+                logger.info("sessão MongoDB MCP Server [slot %d] estabelecida (aggregate aquecido em %d ms)",
+                            slot, int(warm_ms))
                 while not stop.is_set():
                     try:
                         await asyncio.wait_for(stop.wait(), timeout=MCP_PING_SECONDS)
                     except asyncio.TimeoutError:
                         await session.send_ping()  # falhou → reconecta lá fora
-        except Exception as exc:  # noqa: BLE001 — sessão caiu → reconectar
-            app.state.mcp = None
-            app.state.mcp_error = str(exc)
+        except Exception as exc:  # noqa: BLE001 — sessão caiu → reconectar só ESTE slot
+            app.state.mcp_pool[slot] = None
+            app.state.mcp_errors[slot] = str(exc)
             if not stop.is_set():
-                logger.warning("sessão MCP indisponível (%s) — reconectando em %ss",
-                               str(exc)[:200], MCP_RETRY_SECONDS)
+                logger.warning("sessão MCP [slot %d] indisponível (%s) — reconectando em %ss",
+                               slot, str(exc)[:200], MCP_RETRY_SECONDS)
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=MCP_RETRY_SECONDS)
                 except asyncio.TimeoutError:
                     pass
         finally:
-            app.state.mcp = None
-    app.state.mcp = None
+            app.state.mcp_pool[slot] = None
+            if session is not None:
+                forget_connection_id(session)  # limpa _CONNECTION_IDS — não cresce sem teto
+
+
+def get_mcp_session(app: FastAPI) -> ClientSession | None:
+    """Round-robin simples sobre o pool: escolhe a próxima sessão viva.
+
+    Se o slot sorteado estiver caído (reconectando), tenta os outros antes de
+    desistir — um subprocess travado não derruba requests que caberiam nos
+    outros slots do pool.
+    """
+    pool = getattr(app.state, "mcp_pool", None) or []
+    if not pool:
+        return None
+    n = len(pool)
+    start = next(app.state.mcp_rr_counter) % n
+    for offset in range(n):
+        session = pool[(start + offset) % n]
+        if session is not None:
+            return session
+    return None
 
 
 @asynccontextmanager
@@ -111,15 +142,20 @@ async def lifespan(app: FastAPI):
         DEMO_TOKEN_ISSUANCE_ENABLED,
         CORS_ORIGINS,
     )
-    app.state.mcp = None
-    app.state.mcp_error = "sessão MCP ainda inicializando"
+    app.state.mcp_pool = [None] * MCP_POOL_SIZE
+    app.state.mcp_errors = ["pool MCP ainda inicializando"] * MCP_POOL_SIZE
+    app.state.mcp_rr_counter = itertools.count()
     stop = asyncio.Event()
-    task = asyncio.create_task(_mcp_supervisor(app, stop))
+    pool_tasks = [
+        asyncio.create_task(_mcp_supervisor(app, stop, slot))
+        for slot in range(MCP_POOL_SIZE)
+    ]
+    janitor_task = asyncio.create_task(_rate_windows_janitor(stop))
     try:
         yield
     finally:
         stop.set()
-        await task
+        await asyncio.gather(*pool_tasks, janitor_task)
 
 
 app = FastAPI(title="MongoDB Intelligence Layer", lifespan=lifespan)
@@ -223,15 +259,15 @@ async def admin_audit(action: str, request: Request, **details) -> None:
 def enforce_rate_limit(identity: str, multiplier: float = 1.0) -> None:
     """`multiplier` vem da claim de tier do token (área com tier "priority"
     ganha mais requisições/minuto sem tocar código — é dado de area_profiles,
-    não uma constante por área espalhada aqui)."""
+    não uma constante por área espalhada aqui).
+
+    Limpeza PASSIVA: só a janela DESTA identidade é podada aqui — O(1)
+    amortizado por request, nunca um scan de todas as identidades vistas no
+    último minuto. Identidades totalmente inativas (sem request algum) são
+    varridas do dict por uma tarefa periódica em background
+    (`_rate_windows_janitor`), não a cada chamada."""
     limit = max(1, round(RATE_LIMIT_PER_MINUTE * multiplier))
     now = time.monotonic()
-    for key in [k for k, w in _rate_windows.items() if k != identity]:
-        window = _rate_windows[key]
-        while window and now - window[0] > 60:
-            window.popleft()
-        if not window:
-            del _rate_windows[key]
     window = _rate_windows[identity]
     while window and now - window[0] > 60:
         window.popleft()
@@ -242,6 +278,31 @@ def enforce_rate_limit(identity: str, multiplier: float = 1.0) -> None:
                    "para esta identidade. Aguarde e tente novamente.",
         )
     window.append(now)
+
+
+RATE_WINDOWS_JANITOR_SECONDS = 60
+
+
+async def _rate_windows_janitor(stop: asyncio.Event) -> None:
+    """Remove do dict identidades sem nenhum timestamp recente (janela vazia).
+
+    Só existe para não deixar `_rate_windows` crescer sem teto com identidades
+    que nunca mais fazem outro request — a poda por request (`enforce_rate_limit`)
+    já mantém CADA janela viva em O(1), esta tarefa só libera memória das mortas.
+    """
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=RATE_WINDOWS_JANITOR_SECONDS)
+        except asyncio.TimeoutError:
+            now = time.monotonic()
+            dead = []
+            for key, window in list(_rate_windows.items()):
+                while window and now - window[0] > 60:
+                    window.popleft()
+                if not window:
+                    dead.append(key)
+            for key in dead:
+                _rate_windows.pop(key, None)
 
 
 @app.middleware("http")
@@ -580,7 +641,7 @@ async def agent_playlist():
 @app.get("/api/agent/tools")
 async def agent_tools(request: Request):
     """The MongoDB tools the agent has available through the MCP Server."""
-    session = getattr(request.app.state, "mcp", None)
+    session = get_mcp_session(request.app)
     if session is None:
         return {"tools": []}
     tools = await list_agent_tools(session)
@@ -601,9 +662,10 @@ class AgentRunBody(BaseModel):
 
 @app.post("/api/agent/run")
 async def agent_run(request: Request, body: AgentRunBody):
-    session = getattr(request.app.state, "mcp", None)
+    session = get_mcp_session(request.app)
     if session is None:
-        detail = getattr(request.app.state, "mcp_error", "") or ""
+        errors = getattr(request.app.state, "mcp_errors", None) or []
+        detail = next((e for e in errors if e), "")
         raise SafeQueryError(
             "mcp",
             "O MongoDB MCP Server não está disponível (o supervisor está tentando "
@@ -662,6 +724,115 @@ async def agent_run(request: Request, body: AgentRunBody):
     except Exception:  # noqa: BLE001
         logger.exception("falha ao gravar agent_trace (best-effort)")
     return clean(result)
+
+
+async def _persist_agent_trace(result: dict, user_key: str) -> None:
+    """Mesma escrita best-effort de POC.agent_traces usada por /api/agent/run,
+    fatorada para ser reaproveitada pelo endpoint de streaming sem duplicar
+    a lógica de observabilidade/contadores."""
+    observability.metrics.bump("agent_turns")
+    if (result.get("cache") or {}).get("hit"):
+        observability.metrics.bump("cache_hits")
+        observability.metrics.bump("tokens_economizados", (result.get("cache") or {}).get("tokens_economizados", 0))
+    if ((result.get("guardrail") or {}).get("input") or {}).get("action") == "block":
+        observability.metrics.bump("guardrail_blocks")
+    try:
+        await poc()["agent_traces"].insert_one({
+            "conversation_id": result.get("conversation_id"),
+            "user_key": user_key,
+            "area": (result.get("profile") or {}).get("area"),
+            "scenario": result.get("scenario"),
+            "user_message": result.get("user_message"),
+            "answer": result.get("answer"),
+            "model": result.get("model"),
+            "metrics": result.get("metrics"),
+            "cache_hit": (result.get("cache") or {}).get("hit"),
+            "guardrail_action": ((result.get("guardrail") or {}).get("input") or {}).get("action"),
+            "trace": result.get("trace"),
+            "at": datetime.now(timezone.utc),
+        })
+    except Exception:  # noqa: BLE001
+        logger.exception("falha ao gravar agent_trace (best-effort)")
+
+
+def _sse(event: str, data) -> str:
+    return f"event: {event}\ndata: {json.dumps(clean(data), ensure_ascii=False)}\n\n"
+
+
+@app.post("/api/agent/run/stream")
+async def agent_run_stream(request: Request, body: AgentRunBody):
+    """Mesmo turno de /api/agent/run, mas via Server-Sent Events: cada evento de
+    `emit()` (Perceive/Retrieve/Reason/Act/Store/Loop) chega ao cliente assim
+    que é gerado, em vez do trace inteiro só no final — o turno pode levar até
+    AGENT_TURN_TIMEOUT_SECONDS (120s) sem feedback incremental era o problema.
+    Endpoint novo em vez de mudar o antigo: mantém /api/agent/run compatível
+    para quem ainda consome request/response simples (smoke test, scripts)."""
+    session = get_mcp_session(request.app)
+    if session is None:
+        errors = getattr(request.app.state, "mcp_errors", None) or []
+        detail = next((e for e in errors if e), "")
+        raise SafeQueryError(
+            "mcp",
+            "O MongoDB MCP Server não está disponível (o supervisor está tentando "
+            "reconectar). Confira se o Node/npx está instalado e o cluster acessível. "
+            + detail,
+        )
+    user_key = auth.resolve_user_key(request, body.user_key) or DEFAULT_USER_KEY
+    enforce_rate_limit(f"agent:{client_ip(request)}:{user_key}",
+                       multiplier=auth.resolve_rate_limit_multiplier(request))
+    conversation_id = body.conversation_id or f"conv_{uuid4().hex[:16]}"
+
+    async def event_stream():
+        loop = asyncio.get_event_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        SENTINEL = object()
+
+        def on_event(event: dict) -> None:
+            # emit() roda de forma síncrona dentro da task do agente — repassa
+            # pra fila sem bloquear (thread-safe pois estamos na mesma loop).
+            loop.call_soon_threadsafe(queue.put_nowait, event)
+
+        async def run() -> None:
+            try:
+                result = await run_agent(
+                    session, scenario=body.scenario, message=body.message,
+                    conversation_id=conversation_id, user_key=user_key,
+                    on_event=on_event,
+                )
+                await queue.put(("result", result))
+            except SafeQueryError as exc:
+                await queue.put(("error", {"kind": exc.kind, "message": exc.message}))
+            except ValueError as exc:
+                await queue.put(("error", {"kind": "validacao", "message": str(exc)}))
+            except Exception as exc:  # noqa: BLE001
+                await queue.put(("error", {"kind": "agente", "message": f"Falha ao executar o agente: {exc}"}))
+            finally:
+                await queue.put(("__done__", SENTINEL))
+
+        task = asyncio.create_task(run())
+        try:
+            while True:
+                item = await queue.get()
+                if isinstance(item, dict):  # evento de trace (emitido via on_event)
+                    yield _sse("trace", item)
+                    continue
+                kind, payload = item
+                if kind == "__done__":
+                    break
+                if kind == "result":
+                    await _persist_agent_trace(payload, user_key)
+                    yield _sse("result", payload)
+                elif kind == "error":
+                    yield _sse("error", payload)
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ---------- Intelligence features: cache, memory, guardrails (inspect/reset) ----------
