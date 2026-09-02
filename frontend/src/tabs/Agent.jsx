@@ -5,6 +5,7 @@ import Button from '@leafygreen-ui/button';
 import TextInput from '@leafygreen-ui/text-input';
 import { api } from '../api.js';
 import ReplacementChain from '../components/ReplacementChain.jsx';
+import QueryDetails from '../components/QueryDetails.jsx';
 
 // As 6 fases do loop agêntico (mesma narrativa do Perceive→Reason→Act→Store).
 const PHASES = [
@@ -576,6 +577,13 @@ export default function Agent({ state, setState }) {
                 </div>
                 {opDetail(e.args) && <div className="op-detail mono">{opDetail(e.args)}</div>}
                 <div className="op-result mono">{short(e.result, 180)}</div>
+                <QueryDetails
+                  operation={opLabel(e)}
+                  namespace={opTarget(e.args)}
+                  query={e.args}
+                  explain={e.explain}
+                  label="Ver chamada MCP / query executada"
+                />
               </div>
             ))}
           </div>
