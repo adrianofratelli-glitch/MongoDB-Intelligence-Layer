@@ -1037,8 +1037,16 @@ def main():
         except Exception as exc:  # noqa: BLE001
             print(f"  ⚠ índice único em agent_sessions.session_id não criado: "
                   f"{str(exc)[:120]}")
-    poc["agent_memory"].create_index([("user_key", 1), ("active", 1)])
+    # Cobre o filtro e o sort da leitura quente em `_active_docs`. O índice
+    # legado `{user_key, active}` era prefixo redundante do índice de dedupe e
+    # ainda deixava o sort por `created_at` em memória.
+    poc["agent_memory"].create_index(
+        [("user_key", 1), ("active", 1), ("created_at", -1)],
+        name="user_active_created_desc",
+    )
     poc["agent_memory"].create_index([("user_key", 1), ("active", 1), ("fact_norm", 1)])
+    if "user_key_1_active_1" in poc["agent_memory"].index_information():
+        poc["agent_memory"].drop_index("user_key_1_active_1")
     poc["agent_traces"].create_index([("conversation_id", 1), ("at", -1)])
     poc["app_users"].create_index("user_key", unique=True)
     # order_id único: a query quente do agente nunca faz collection scan (o

@@ -123,7 +123,10 @@ app_users.create_index("user_key", unique=True)
 support_orders.create_index("order_id", unique=True)
 
 # as queries quentes da memória
-agent_memory.create_index([("user_key", 1), ("active", 1)])
+agent_memory.create_index(
+    [("user_key", 1), ("active", 1), ("created_at", -1)],
+    name="user_active_created_desc",
+)
 agent_memory.create_index([("user_key", 1), ("active", 1), ("fact_norm", 1)])
 agent_traces.create_index([("conversation_id", 1), ("at", -1)])
 guardrail_candidates.create_index([("status", 1), ("at", -1)])
@@ -131,6 +134,11 @@ guardrail_candidates.create_index([("status", 1), ("at", -1)])
 # fallback exato do cache — sem ele vira COLLSCAN quando o vetorial está fora
 semantic_cache.create_index([("question_norm", 1), ("area", 1)])
 ```
+
+O primeiro índice de memória cobre a leitura dos fatos ativos já na ordem
+`created_at DESC`. O índice legado `{user_key, active}` foi removido por ser
+prefixo redundante e por não evitar o sort em memória. O índice com `fact_norm`
+permanece porque atende a deduplicação exata.
 
 Racional de cada um:
 
