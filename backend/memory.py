@@ -57,8 +57,7 @@ _DURABLE_SIGNAL_RE = re.compile(
     r"não gosto de|meu contato|fale comigo|moro em|meu idioma|sou alérgico|"
     r"sou alérgica|tenho alergia|costumo|"
     r"sempre compro|já comprei|"
-    r"quero receber|me avise|me avisa|por whatsapp|via whatsapp|whatsapp|"
-    r"por e-mail|por email|por sms|por telefone)\b",
+    r"quero receber|me avise|me avisa)\b",
     re.IGNORECASE,
 )
 
