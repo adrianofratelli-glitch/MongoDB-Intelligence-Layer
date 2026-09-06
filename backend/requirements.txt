@@ -8,3 +8,6 @@ mcp>=1.0
 python-dotenv==1.*
 # JWT demo-issuer (produção troca a emissão pelo IdP corporativo via JWKS)
 pyjwt>=2.9,<3
+
+# Security floors for existing transitive dependencies; no core replacement.
+pydantic-settings>=2.14.2,<3
