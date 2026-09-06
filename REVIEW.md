@@ -46,3 +46,15 @@ Auditoria do ambiente instalado, não de uma resolução limpa do manifesto; fer
 Varredura por padrões de chaves privadas, chaves Anthropic/AWS e URI MongoDB autenticada no histórico Git local alcançável: nenhuma credencial real confirmada; matches encontrados eram placeholders conhecidos. Limite: não é scanner de entropia, não cobre objetos inacessíveis, texto em screenshots nem logs externos.
 
 Nenhum import/referência estática a `_shared/grove_client.py` foi encontrado nesta PoV. Configuração própria de gateway/ambiente não constitui dependência de código desse módulo. `_shared` permaneceu intocado; consumidores externos/dinâmicos não são garantidos por busca estática. Relatório separado: `../REVIEW_SHARED.md`.
+
+
+## Fechamento final — 2026-09-05
+
+Esta seção atualiza o estado dos achados históricos acima.
+
+- Aplicado/reavaliado: Piso pydantic-settings ≥2.14.2,<3 no manifesto e ambiente atualizado.
+- Validação: 28 testes de políticas; npm sem achados.
+- Propostas e limites restantes: cryptography 49 → 50: correção de segurança, mas major core precisa matriz TLS/crypto. mcp 1.28.0 → 1.28.1: patch core com advisory de WebSocket; atualização sozinha não habilita proteção e exige TransportSecuritySettings nos consumidores aplicáveis. Propor auditoria de transporte/subprocesso e contrato antes de alterar. Não mudar seed, thresholds, cache/memória ou escopo de usuário.
+- pip-audit atual: cryptography 49.0.0: PYSEC-2026-3552; mcp 1.28.0: PYSEC-2026-3483
+- Ambiente: pip 26.2.1 nos ambientes que possuem pip; FinScope mantém uv sem pip. Essa atualização local não altera arquivos de dependências das PoVs.
+- `_shared`: nenhum importador estático comprovado nesta PoV; apenas smoke consome o helper no inventário.
