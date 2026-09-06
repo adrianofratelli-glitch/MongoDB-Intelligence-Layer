@@ -1,3 +1,11 @@
+// O prazo cobre headers e corpo; nenhuma escrita é reenviada automaticamente.
+async function boundedRequest(work, timeoutMs = 30000) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try { return await work(controller.signal) }
+  finally { clearTimeout(timer) }
+}
+
 // HTTP client. Backend errors arrive as {error: {kind, message}} (503) and
 // become ApiError — the UI shows them in a yellow Banner, never a stack trace.
 
@@ -17,24 +25,30 @@ export function setAuthToken(token) {
 }
 
 async function request(path, options = {}) {
-  let res;
-  try {
-    res = await fetch(path, {
-      headers: {
-        'Content-Type': 'application/json',
-        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-      },
-      ...options,
+  return boundedRequest(async (signal) => {
+    let res;
+    try {
+      res = await fetch(path, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        ...options,
+        signal,
+      });
+    } catch {
+      throw new ApiError('rede', 'Backend não respondeu. O FastAPI está rodando na porta 8010?');
+    }
+    const body = await res.json().catch(() => {
+      if (res.ok) throw new Error('Resposta incompleta ou inválida do backend. Tente novamente.')
+      return {}
     });
-  } catch {
-    throw new ApiError('rede', 'Backend não respondeu. O FastAPI está rodando na porta 8010?');
-  }
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = body.error || {};
-    throw new ApiError(err.kind || 'erro', err.message || body.detail || `Erro HTTP ${res.status}`);
-  }
-  return body;
+    if (!res.ok) {
+      const err = body.error || {};
+      throw new ApiError(err.kind || 'erro', err.message || body.detail || `Erro HTTP ${res.status}`);
+    }
+    return body;
+  }, path.includes('/agent/run') || path.includes('/chat/') ? 300000 : 30000)
 }
 
 export const api = {
@@ -95,17 +109,22 @@ export const api = {
       throw new ApiError('rede', 'Backend não respondeu. O FastAPI está rodando na porta 8010?');
     }
     if (!res.ok || !res.body) {
-      const errBody = await res.json().catch(() => ({}));
+      const errBody = await res.json().catch(() => {
+    if (res.ok) throw new Error('Resposta incompleta ou inválida do backend. Tente novamente.')
+    return {}
+  });
       const err = errBody.error || {};
       throw new ApiError(err.kind || 'erro', err.message || errBody.detail || `Erro HTTP ${res.status}`);
     }
     const reader = res.body.getReader();
+    try {
     const decoder = new TextDecoder();
     let buffer = '';
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
+      buffer = buffer.replace(/\r\n/g, '\n');
       // Eventos SSE separados por linha em branco; cada bloco tem "event: x\ndata: {...}"
       let sep;
       while ((sep = buffer.indexOf('\n\n')) !== -1) {
@@ -126,6 +145,10 @@ export const api = {
       }
     }
     throw new ApiError('rede', 'Conexão de streaming encerrada sem resultado.');
+    } finally {
+      reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
   },
 
   // Intelligence features — cache, memory, guardrails (inspect / reset)

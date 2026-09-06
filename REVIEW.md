@@ -58,3 +58,13 @@ Esta seção atualiza o estado dos achados históricos acima.
 - pip-audit atual: cryptography 49.0.0: PYSEC-2026-3552; mcp 1.28.0: PYSEC-2026-3483
 - Ambiente: pip 26.2.1 nos ambientes que possuem pip; FinScope mantém uv sem pip. Essa atualização local não altera arquivos de dependências das PoVs.
 - `_shared`: nenhum importador estático comprovado nesta PoV; apenas smoke consome o helper no inventário.
+
+
+## Homologação de resiliência e UI
+
+- Melhoria: Limitar JSON a 30 s/agente a 300 s; rejeitar HTTP 200 incompleto; aceitar SSE CRLF e liberar leitor após resultado.
+- Isolamento: `review/codex-homologation`, baseada no HEAD `571dc7a`. Mudança de estado observável; aguardando aprovação individual, sem merge.
+- Validação: build passou; UI offline em 1440×1000, 768×1024 e 360×800 sem pageerror nem overflow horizontal; skip link transfere foco. 3 testes novos de transporte/polling neste repositório. As suítes locais anteriores foram reexecutadas; resultados consolidados no vault PoVs-Handoffs.
+- Limite: teste offline/fixture não certifica cenário real completo nem ausência de bugs. Não houve alteração de schema, dataset ou dependência core.
+- Propostas preservadas: cryptography 49 → 50: correção de segurança, mas major core precisa matriz TLS/crypto. mcp 1.28.0 → 1.28.1: patch core com advisory de WebSocket; atualização sozinha não habilita proteção e exige TransportSecuritySettings nos consumidores aplicáveis. Propor auditoria de transporte/subprocesso e contrato antes de alterar. Não mudar seed, thresholds, cache/memória ou escopo de usuário.
+- `_shared` e daemon do portal não foram alterados nesta rodada.
