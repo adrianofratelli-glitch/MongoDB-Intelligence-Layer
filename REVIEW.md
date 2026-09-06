@@ -1,3 +1,5 @@
+> Estado vigente: melhoria `87f7e2f` aprovada pelo usuário e integrada em `main`. As menções abaixo a aprovação pendente são históricas. As propostas de core/schema/dataset continuam sem aplicação.
+
 # Revisão de engenharia e design — singleagent
 
 ## Resultado

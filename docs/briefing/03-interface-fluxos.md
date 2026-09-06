@@ -111,3 +111,8 @@ Os passos 5 a 9 são os que ganham a conversa contra "isso eu faço com Postgres
 - Uma pergunta de catálogo de aquecimento: ela exercita o `$vectorSearch` via MCP, que é o caminho com mais peças no meio.
 - `calibrate_thresholds.py` rodado depois de qualquer mudança de índice ou de modelo de embedding.
 - Sessão MCP viva — confere a listagem de ferramentas disponíveis antes de começar.
+
+
+## Comportamento de resiliência integrado
+
+Limitar JSON a 30 s/agente a 300 s; rejeitar HTTP 200 incompleto; aceitar SSE CRLF e liberar leitor após resultado. A implementação vigente está em `main`; consulte o estado atual de `../../REVIEW.md` para validação e propostas não aplicadas.
