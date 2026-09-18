@@ -11,3 +11,7 @@ pyjwt>=2.9,<3
 
 # Security floors for existing transitive dependencies; no core replacement.
 pydantic-settings>=2.14.2,<3
+
+# Observability do loop do agente (trace/generation/span). Fail-open sem chaves
+# configuradas — ver backend/tracing.py.
+langfuse>=2,<3

@@ -7,6 +7,36 @@ import { api } from '../api.js';
 import ReplacementChain from '../components/ReplacementChain.jsx';
 import QueryDetails from '../components/QueryDetails.jsx';
 
+// Prova visual do pitch "MongoDB reduz custo de LLM", direto na PoV — sem precisar
+// abrir o Langfuse para ver. Duas camadas de cache SÃO dados reais deste turno,
+// não estimativa de marketing: cache semântico ($vectorSearch em POC.semantic_cache,
+// HIT = zero chamada ao LLM) e prompt cache da Anthropic (cache_control ephemeral no
+// system prompt, ancorado no MongoDB via ai_brain.area_profiles/model_config — o que
+// muda o texto do system é um documento, então o prefixo cacheável é estável entre
+// turnos da mesma área).
+function MongoCacheSavings({ cache, metrics }) {
+  if (!cache && !metrics) return null;
+  const promptTotal = (metrics?.input_tokens || 0) + (metrics?.cache_read_input_tokens || 0);
+  const promptPct = promptTotal > 0 ? Math.round((metrics.cache_read_input_tokens / promptTotal) * 100) : 0;
+  return (
+    <div className="cache-savings-card">
+      <div className="cache-savings-title">💰 Economia MongoDB neste turno</div>
+      <div className="cache-savings-row">
+        <span>Cache semântico (Atlas Vector Search)</span>
+        {cache?.hit
+          ? <b className="cache-savings-hit">HIT — 0 chamadas ao LLM (~{cache.tokens_economizados ?? 0} tokens evitados)</b>
+          : <span className="dim">MISS — resposta gerada pelo LLM (score {cache?.score ?? '—'})</span>}
+      </div>
+      {promptTotal > 0 && (
+        <div className="cache-savings-row">
+          <span>Prompt cache (Anthropic, prefixo ancorado em documento do MongoDB)</span>
+          <b className="cache-savings-hit">{metrics.cache_read_input_tokens} de {promptTotal} tokens reaproveitados ({promptPct}%)</b>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // As 6 fases do loop agêntico (mesma narrativa do Perceive→Reason→Act→Store).
 const PHASES = [
   { key: 'perceive', icon: '👁️', label: 'Perceber', sub: 'Usuário → Agente' },
@@ -614,7 +644,14 @@ export default function Agent({ state, setState }) {
           <div className="agent-col">
             <div className="col-head"><span className="brain">🧠</span> Raciocínio do LLM
               {run && <Badge variant="blue" className="ml">{run.model}</Badge>}
+              {run?.langfuse_trace_url && (
+                <a href={run.langfuse_trace_url} target="_blank" rel="noreferrer"
+                   className="ml langfuse-link" title="Abrir trace completo (tokens, custo, latência por passo) no Langfuse">
+                  🔭 Ver trace no Langfuse ↗
+                </a>
+              )}
             </div>
+            {run && <MongoCacheSavings cache={run.cache} metrics={run.metrics} />}
             {reasonings.length === 0 && <div className="dim">O raciocínio aparece na fase "Raciocinar".</div>}
             {reasonings.map((e, i) => (
               <div key={i} className={`reason-item ${current === e ? 'pulse' : ''}`}>

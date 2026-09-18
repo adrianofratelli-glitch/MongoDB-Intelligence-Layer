@@ -29,6 +29,7 @@ from db import MAX_TIME_MS, poc
 from graph import build_order_chain_pipeline, summarize_order_chain
 from guidance import denial_hint, empty_order_hint, is_obviously_out_of_scope, scope_reply
 from llm import get_active_config
+import tracing
 
 
 def estimate_tokens(text: str) -> int:
@@ -1170,6 +1171,11 @@ async def run_agent(
         raise ValueError("Esta conversa pertence a outra identidade de demonstração.")
 
     trace: list[dict] = []
+    # lf_trace nasce None e só é criada DEPOIS da máscara de PII (ver abaixo) —
+    # criá-la aqui com user_msg cru vazaria CPF/e-mail para o Langfuse antes do
+    # guardrail rodar. `emit`, definida abaixo, lê `lf_trace` por clausura; a
+    # reatribuição mais adiante já é visível para ela sem precisar de nonlocal.
+    lf_trace = None
     metrics = {
         "reads": 0, "writes": 0, "tools_used": 0, "latency_ms": 0,
         "input_tokens": 0, "output_tokens": 0,
@@ -1194,6 +1200,25 @@ async def run_agent(
                 on_event(event)
             except Exception:  # noqa: BLE001 — falha no streaming nunca derruba o turno
                 logger.exception("on_event falhou (streaming) — turno continua")
+        # Espelha o mesmo evento no Langfuse: reasoning (chamada ao LLM) vira
+        # generation com custo/tokens; tool_call (MCP/Mongo) vira span. No-op
+        # se Langfuse não estiver configurado.
+        if kind == "reasoning":
+            tracing.log_generation(
+                lf_trace, name=f"{phase}.reasoning", model=fields.get("model"),
+                input_text=None, output_text=fields.get("text"),
+                usage={k: fields.get(k, 0) for k in (
+                    "input_tokens", "output_tokens",
+                    "cache_read_input_tokens", "cache_creation_input_tokens")},
+                latency_ms=fields.get("latency_ms", 0),
+            )
+        elif kind == "tool_call":
+            tracing.log_span(
+                lf_trace, name=f"{phase}.{fields.get('tool', 'tool')}",
+                input_data=fields.get("args"), output_data=fields.get("result"),
+                metadata={"is_error": fields.get("is_error", False),
+                         "latency_ms": fields.get("latency_ms")},
+            )
 
     # ---- Identity → area profile (persona + which policies apply) -------------
     # Who is talking decides which AREA rules the whole turn: persona in the
@@ -1213,6 +1238,12 @@ async def run_agent(
     guard_in = await guardrails.check_input(user_msg, user_key, conversation_id, area)
     metrics["reads"] += 1  # the denylist $vectorSearch
     user_msg = guard_in.get("masked_text") or user_msg
+
+    # Trace do Langfuse nasce SÓ AGORA, com o texto já mascarado — nunca com PII crua.
+    lf_trace = tracing.start_trace(
+        name="singleagent.turn", user_id=user_key, session_id=conversation_id,
+        input_text=user_msg, metadata={"scenario": scenario, "area": area},
+    )
 
     # Perceive — the customer message enters the loop (já sem PII em claro)
     emit("perceive", "message", actor="user", text=user_msg)
@@ -1236,10 +1267,11 @@ async def run_agent(
                                              final_answer, emit, metrics)
         emit("act", "message", actor="agent", text=final_answer)
         emit("loop", "message", actor="agent", text="Turno encerrado pelo guardrail.")
+        tracing.finish_trace(lf_trace, output_text=final_answer)
         return _result(scenario, user_msg, final_answer, conversation_id, turn_count,
                        trace, metrics, guard_in,
                        {"hit": False, "blocked": True}, None, None, agent_model,
-                       profile_info)
+                       profile_info, lf_trace_url=tracing.trace_url(lf_trace))
 
     if is_obviously_out_of_scope(user_msg):
         final_answer = await scope_reply(user_key)
@@ -1255,10 +1287,12 @@ async def run_agent(
             conversation_id, user_key, user_msg, final_answer, emit, metrics,
         )
         emit("act", "message", actor="agent", text=final_answer)
+        tracing.finish_trace(lf_trace, output_text=final_answer)
         return _result(
             scenario, user_msg, final_answer, conversation_id, turn_count,
             trace, metrics, guard_in, {"hit": False, "scope_redirect": True},
             None, None, agent_model, profile_info,
+            lf_trace_url=tracing.trace_url(lf_trace),
         )
 
     # ---- Semantic cache lookup (scoped to the user's area) ---------------------
@@ -1287,9 +1321,10 @@ async def run_agent(
         emit("act", "message", actor="agent", text=final_answer)
         emit("loop", "message", actor="agent",
              text="Respondido pelo cache semântico — próximo turno.")
+        tracing.finish_trace(lf_trace, output_text=final_answer)
         return _result(scenario, user_msg, final_answer, conversation_id, turn_count,
                        trace, metrics, guard_in, cache_res, None, None, agent_model,
-                       profile_info)
+                       profile_info, lf_trace_url=tracing.trace_url(lf_trace))
 
     # ---- Long-term memory: only the facts RELEVANT to this turn ---------------
     # $vectorSearch pré-filtrado (user_key + active são campos de filtro do índice):
@@ -1478,6 +1513,7 @@ async def run_agent(
 
     cache_res["stored"] = cache_stored
     ltm_after = await memory.load_longterm(user_key)
+    tracing.finish_trace(lf_trace, output_text=final_answer)
     return _result(scenario, user_msg, final_answer, conversation_id, turn_count,
                    trace, metrics, guard_in, cache_res,
                    {"new_facts": new_facts, "superseded": superseded,
@@ -1487,12 +1523,12 @@ async def run_agent(
                         "input_tokens": metrics["memory_extractor_input_tokens"],
                         "output_tokens": metrics["memory_extractor_output_tokens"],
                     }}, guard_out,
-                   agent_model, profile_info)
+                   agent_model, profile_info, lf_trace_url=tracing.trace_url(lf_trace))
 
 
 def _result(scenario, user_msg, final_answer, conversation_id, turn_count, trace,
             metrics, guard_in, cache_res, memory_info, guard_out, model,
-            profile=None) -> dict:
+            profile=None, lf_trace_url=None) -> dict:
     """Assemble the response envelope with the panel-ready feature flags."""
     return {
         "scenario": scenario,
@@ -1507,4 +1543,5 @@ def _result(scenario, user_msg, final_answer, conversation_id, turn_count, trace
         "guardrail": {"input": guard_in, "output": guard_out},
         "cache": cache_res,
         "memory": memory_info,
+        "langfuse_trace_url": lf_trace_url,
     }

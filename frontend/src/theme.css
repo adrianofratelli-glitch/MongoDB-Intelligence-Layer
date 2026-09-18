@@ -817,6 +817,21 @@ footer.app-footer p {
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border-subtle);
 }
+.langfuse-link {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-decoration: none;
+  color: #5b21b6;
+  background: #ede9fe;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.langfuse-link:hover { background: #ddd6fe; }
+.cache-savings-card { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 8px 10px; margin: 8px 0; font-size: 12px; display: grid; gap: 4px; }
+.cache-savings-title { font-weight: 700; color: #166534; }
+.cache-savings-row { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.cache-savings-hit { color: #15803d; }
 
 /* coluna MongoDB */
 .op-item {
