@@ -51,6 +51,8 @@ Cada etapa é uma operação real do MongoDB, visível no trace e no inspector d
 
 > **Os limiares são medidos, não chutados.** A escala do `vectorSearchScore` pode mudar quando o índice/modelo autoEmbed voyage-4 é atualizado (este cluster foi de ~0,50 para ~0,59–0,86 em agosto de 2026). O ranqueamento é confiável, a escala absoluta não. `ai_brain.cache_config` e `ai_brain.guardrail_policies` guardam os limiares ao vivo, definidos pelo `backend/calibrate_thresholds.py` contra probes rotuladas. Rode de novo sempre que o modelo, o cluster, o índice ou os dados semeados mudarem.
 
+**Observability opcional via Langfuse.** Com `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` no `.env`, cada turno vira uma trace replayável (generation por chamada de LLM, span por tool call MCP) — badge "Ver trace no Langfuse" na UI. Sem as chaves, vira no-op e nada muda. Detalhes em [`docs/briefing/01-arquitetura.md`](docs/briefing/01-arquitetura.md#observability-opcional-langfuse).
+
 **Pitch sem as mãos.** O *▶ Demo automática* toca uma playlist de 12 roteiros alternando cache, guardrail, memória, agente transacional e isolamento por área, trocando a pílula de usuário ao vivo para que a plateia veja a mesma pergunta bloqueada em uma área e respondida em outra. Em pausa, ◀/▶ reproduzem roteiros já executados a partir do histórico em memória — sem novas chamadas de API, com os resultados exatamente como aconteceram.
 
 ## Coleções

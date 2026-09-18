@@ -172,6 +172,10 @@ Antes era um bloco único, e aí qualquer fato novo de memória invalidava o cac
 
 O gateway de LLM também tem retry no **mesmo** modelo (2 tentativas, backoff 1s/2s) antes de cair pro `fallback_model` — e as duas coisas aparecem no trace.
 
+## Observability opcional: Langfuse
+
+`backend/tracing.py` manda uma trace por turno pro Langfuse — uma generation por chamada de raciocínio do LLM, um span por tool call MCP. Fail-open: sem `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` no `.env`, vira no-op e o turno segue normal. A trace só nasce DEPOIS do guardrail mascarar PII (nunca antes). Na UI, um badge "Ver trace no Langfuse" aparece ao lado do raciocínio quando configurado, e um card "Economia MongoDB" mostra cache semântico + prompt cache do turno sem precisar sair da tela.
+
 ## Como rodar
 
 ```bash
