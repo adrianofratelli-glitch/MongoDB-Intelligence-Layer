@@ -14,27 +14,23 @@ import QueryDetails from '../components/QueryDetails.jsx';
 // system prompt, ancorado no MongoDB via ai_brain.area_profiles/model_config — o que
 // muda o texto do system é um documento, então o prefixo cacheável é estável entre
 // turnos da mesma área).
-function MongoCacheSavings({ cache, metrics }) {
-  if (!cache && !metrics) return null;
-  const promptTotal = (metrics?.input_tokens || 0) + (metrics?.cache_read_input_tokens || 0);
-  const promptPct = promptTotal > 0 ? Math.round((metrics.cache_read_input_tokens / promptTotal) * 100) : 0;
-  return (
-    <div className="cache-savings-card">
-      <div className="cache-savings-title">💰 Economia MongoDB neste turno</div>
-      <div className="cache-savings-row">
-        <span>Cache semântico (Atlas Vector Search)</span>
-        {cache?.hit
-          ? <b className="cache-savings-hit">HIT — 0 chamadas ao LLM (~{cache.tokens_economizados ?? 0} tokens evitados)</b>
-          : <span className="dim">MISS — resposta gerada pelo LLM (score {cache?.score ?? '—'})</span>}
-      </div>
-      {promptTotal > 0 && (
-        <div className="cache-savings-row">
-          <span>Prompt cache (Anthropic, prefixo ancorado em documento do MongoDB)</span>
-          <b className="cache-savings-hit">{metrics.cache_read_input_tokens} de {promptTotal} tokens reaproveitados ({promptPct}%)</b>
-        </div>
-      )}
-    </div>
-  );
+function MongoCacheSavings({ run }) {
+  const calls = run.llm_calls || [];
+  const cost = run.economics?.estimated_cost_usd;
+  const parallel = calls.some((a, i) => calls.slice(i + 1).some(b => a.agent !== b.agent &&
+    Math.max(Date.parse(a.started_at), Date.parse(b.started_at)) <
+    Math.min(Date.parse(a.started_at) + a.latency_ms, Date.parse(b.started_at) + b.latency_ms)));
+  return <details className="execution-summary">
+    <summary>Resumo do turno · {calls.length} chamadas · {cost != null ? `$${cost.toFixed(4)} USD estimados` : 'Custo indisponível'}
+      {' · '}{run.cache?.hit ? 'Resposta em cache' : parallel ? 'Agente + memória em paralelo' : 'Loop de um agente'}</summary>
+    <p>Estimativa pelas médias observadas no Grove; não representa cobrança exata.</p>
+    <p>As etapas de raciocínio e ferramentas pertencem ao mesmo agente. A extração de memória pode executar em paralelo.</p>
+    {calls.map((call, i) => <div className="cache-savings-row" key={i}>
+      <span>{call.agent === 'memory_extractor' ? 'Memória' : 'Atendimento'} · {call.model}{call.fallback ? ' · fallback' : ''}</span>
+      <span>{call.status} · {Math.round(call.latency_ms)} ms · {call.usage_known ? `${call.input_tokens + call.output_tokens + call.cache_read_tokens + call.cache_write_tokens} tokens` : 'consumo não informado'}</span>
+    </div>)}
+    {!!calls.length && <p>Tokens de cache reutilizados: {calls.reduce((n, c) => n + (c.cache_read_tokens || 0), 0)}.</p>}
+  </details>;
 }
 
 // As 6 fases do loop agêntico (mesma narrativa do Perceive→Reason→Act→Store).
@@ -651,7 +647,7 @@ export default function Agent({ state, setState }) {
                 </a>
               )}
             </div>
-            {run && <MongoCacheSavings cache={run.cache} metrics={run.metrics} />}
+            {run && <MongoCacheSavings run={run} />}
             {reasonings.length === 0 && <div className="dim">O raciocínio aparece na fase "Raciocinar".</div>}
             {reasonings.map((e, i) => (
               <div key={i} className={`reason-item ${current === e ? 'pulse' : ''}`}>

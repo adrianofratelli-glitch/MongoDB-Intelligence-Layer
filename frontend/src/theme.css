@@ -1216,3 +1216,7 @@ footer.app-footer p {
   .chain-link { justify-content: center; }
   .chain-link i { width: 1px; height: 10px; }
 }
+
+.execution-summary { margin: 8px 0; border: 1px solid #40565e; border-radius: 8px; padding: 10px 14px; font-size: 12px; }
+.execution-summary summary { cursor: pointer; font-weight: 600; }
+.execution-summary p { margin: 8px 0; }

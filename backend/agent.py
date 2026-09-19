@@ -64,13 +64,9 @@ MAX_TRACE_RESULT_CHARS = 1_200
 CHARS_PER_TOKEN_ESTIMATE = 4
 
 # Um único client HTTP para todos os turnos (pool de conexões reutilizado)
-anthropic_client = AsyncAnthropic(
-    api_key="dummy",
-    base_url=os.getenv("ANTHROPIC_BASE_URL"),
-    default_headers={"api-key": os.getenv("ANTHROPIC_API_KEY", "")},
-    timeout=float(os.getenv("ANTHROPIC_TIMEOUT_SECONDS", "45")),
-    max_retries=0,  # retries/fallback are explicit in _create_with_retry
-)
+from gateway import GatewayClient, metered_turn
+
+anthropic_client = GatewayClient(role="support_agent")
 
 LLM_RETRIES = 2            # novas tentativas no MESMO modelo antes do fallback
 LLM_BACKOFF_SECONDS = 1.0  # backoff exponencial: 1s, 2s
@@ -109,7 +105,7 @@ async def _create_with_retry(client, *, model: str, fallback_model: str | None =
                 await asyncio.sleep(LLM_BACKOFF_SECONDS * (2 ** attempt))
     if fallback_model and fallback_model != model:
         try:
-            return await client.messages.create(model=fallback_model, **kwargs)
+            return await client.messages.create(model=fallback_model, **({"_fallback": True} if isinstance(client, GatewayClient) else {}), **kwargs)
         except APIError as exc:
             last_exc = exc
     raise last_exc
@@ -1131,6 +1127,7 @@ async def _load_recent_history(conversation_id: str, user_key: str) -> tuple[lis
     return list(reversed(selected)), summary
 
 
+@metered_turn
 async def run_agent(
     session: ClientSession,
     *,

@@ -13,13 +13,9 @@ from anthropic import APIError, AsyncAnthropic
 import observability
 from db import MAX_TIME_MS, SafeQueryError, ai_brain, safe_query
 
-client = AsyncAnthropic(
-    api_key="dummy",  # Grove/Azure APIM auth goes via api-key header, not x-api-key
-    base_url=os.getenv("ANTHROPIC_BASE_URL"),
-    default_headers={"api-key": os.getenv("ANTHROPIC_API_KEY", "")},
-    timeout=float(os.getenv("ANTHROPIC_TIMEOUT_SECONDS", "45")),
-    max_retries=0,  # fallback/retry is explicit in call_with_fallback
-)
+from gateway import GatewayClient, metered_turn
+
+client = GatewayClient(role="model_swap")
 
 # Micro-cache opcional do model_config. Default 0 = DESLIGADO: a regra da demo
 # ("o doc é lido a cada request, swap é instantâneo") continua valendo. Em
@@ -63,11 +59,12 @@ async def get_active_config(area: str = "default") -> dict:
     return doc
 
 
-async def call_model(model_cfg: dict, system: str, messages: list[dict]) -> dict:
+async def call_model(model_cfg: dict, system: str, messages: list[dict], fallback: bool = False) -> dict:
     """A single call to the model described by model_cfg ({model, temperature, max_tokens})."""
     start = time.perf_counter()
     resp = await client.messages.create(
         model=model_cfg["model"],
+        _fallback=fallback,
         max_tokens=model_cfg.get("max_tokens", 1024),
         temperature=model_cfg.get("temperature", 0.3),
         system=system,
@@ -89,6 +86,7 @@ async def call_model(model_cfg: dict, system: str, messages: list[dict]) -> dict
     }
 
 
+@metered_turn
 async def call_with_fallback(system: str, messages: list[dict],
                              area: str = "default") -> dict:
     """Reads model_config now, tries the primary and falls back on an API error."""
@@ -98,6 +96,6 @@ async def call_with_fallback(system: str, messages: list[dict],
         result["route"] = "primary"
         return result
     except APIError:
-        result = await call_model(cfg["fallback"], system, messages)
+        result = await call_model(cfg["fallback"], system, messages, fallback=True)
         result["route"] = "fallback"
         return result
