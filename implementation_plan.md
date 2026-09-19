@@ -8,8 +8,8 @@ A tese: **configuração de prompt, configuração de modelo, cache semântico e
 
 | Arquivo | O que responde |
 |---|---|
-| [`docs/briefing/01-arquitetura.md`](docs/briefing/01-arquitetura.md) | as três abas, o pipeline por turno, os nove invariantes (reescrita de tool, higiene de cache, PII, budgets, produção fail-closed), isolamento por área, como rodar, ordem de trabalho |
-| [`docs/briefing/02-mongodb.md`](docs/briefing/02-mongodb.md) | os dois databases, a estratégia de embedding (autoEmbed voyage-4, `flat`), as definições dos 3 índices vetoriais + BM25, índices regulares e TTL, **todas as queries com o pipeline colado** (cache, denylist, memória híbrida com RRF, supersessão ACID, sessões) e as queries reescritas que o agente executa via MCP, mais a calibração de limiares |
-| [`docs/briefing/03-interface-fluxos.md`](docs/briefing/03-interface-fluxos.md) | estado no shell, as três telas, o switcher de identidade, endpoints de reset, roteiro de demo |
+| [`docs/briefing/architecture.md`](docs/briefing/architecture.md) | as três abas, o pipeline por turno, os nove invariantes (reescrita de tool, higiene de cache, PII, budgets, produção fail-closed), isolamento por área, como rodar, ordem de trabalho |
+| [`docs/briefing/queries.md`](docs/briefing/queries.md) | os dois databases, a estratégia de embedding (autoEmbed voyage-4, `flat`), as definições dos 3 índices vetoriais + BM25, índices regulares e TTL, **todas as queries com o pipeline colado** (cache, denylist, memória híbrida com RRF, supersessão ACID, sessões) e as queries reescritas que o agente executa via MCP, mais a calibração de limiares |
+| [`docs/briefing/ui-flows.md`](docs/briefing/ui-flows.md) | estado no shell, as três telas, o switcher de identidade, endpoints de reset, roteiro de demo |
 
 Se for ler só um: o **01**, pelo invariante 2. Reescrever a chamada de ferramenta — em vez de validar — é o que essa PoV tem de diferente.
