@@ -83,7 +83,7 @@ Os botões de limpar cache/memória são o que permite repetir a mesma demo do z
 9. Tenta induzir query ampla / escrita na própria memória — negação acontece ANTES do MCP, no reescritor.
 10. Troca pra área Financeiro — threshold mais rígido, comportamento fail-closed.
 
-Passos 5–9 são os que ganham a conversa contra "isso eu faço com Postgres + pgvector" — não é sobre o vetor, é sobre onde a política vive e quem consegue auditar.
+Passos 5–9 são os que ganham a conversa contra "isso eu faço com uma extensão vetorial no meu banco atual" — não é sobre o vetor, é sobre onde a política vive e quem consegue auditar.
 
 ## Antes de apresentar (checklist operacional)
 

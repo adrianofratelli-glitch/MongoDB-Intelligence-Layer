@@ -21,7 +21,7 @@ A aba 3 é o core do produto e o assunto deste documento (e de `agent-behavior.m
 - **Backend**: Python 3.12+, FastAPI (`backend/main.py`), driver `pymongo` Async (`AsyncMongoClient`, não Motor — deprecado). Dois databases no mesmo cluster Atlas: `ai_brain` (config viva, só humano escreve) e `POC` (dados de demo + telemetria).
 - **LLM**: Anthropic (Claude Sonnet 4.5 default, fallback configurável), acessado via um gateway HTTP interno (`backend/gateway.py`, `GatewayClient`) — não direto ao SDK.
 - **Ferramentas do agente**: MongoDB MCP Server (`npx mongodb-mcp-server@2.1.0`, pinado — ver `backend/agent.py:mcp_server_params`), o mesmo protocolo que uma IDE usaria, rodando via stdio.
-- **Observability**: Langfuse self-host, fail-open (`backend/tracing.py`) — nunca mencionar Postgres pro cliente (é infra interna do Langfuse).
+- **Observability**: Langfuse self-host, fail-open (`backend/tracing.py`) — a infra interna do Langfuse não é exposta em material de cliente (ver `../observability/README.md`).
 - **Frontend**: React 18 + Vite + LeafyGreen (design system MongoDB), JavaScript puro (sem TS), sem router/estado externo. `fetch` cru embrulhado em `api.js`.
 
 ## Componentes (backend/)
