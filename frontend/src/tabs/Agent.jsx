@@ -742,9 +742,11 @@ function FeatureFlags({ run }) {
 
   // Cache
   let cacheClass = 'miss';
-  let cacheTitle = '⚡ Cache semântico · MISS';
+  let cacheTitle = cache.mode === 'bypass' ? '⚡ Cache semântico · IGNORADO' : '⚡ Cache semântico · MISS';
   let cacheDetail = cache.blocked
     ? 'Não consultado (pedido bloqueado).'
+    : cache.mode === 'bypass'
+    ? 'Ignorado: turno pessoal (depende da memória do usuário) — nunca usa nem grava o cache compartilhado.'
     : `Melhor score ${cache.score ?? 0} < ${cache.threshold ?? 0.92}. ${cache.stored ? 'Resposta gravada no cache.' : ''}`;
   if (cache.hit) {
     cacheClass = 'hit';
