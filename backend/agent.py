@@ -1293,18 +1293,30 @@ async def run_agent(
         )
 
     # ---- Semantic cache lookup (scoped to the user's area) ---------------------
-    cache_res = await cache.lookup(user_msg, area)
-    metrics["reads"] += 1
-    emit("retrieve", "tool_call", actor="mongodb",
-         tool="$vectorSearch (semantic_cache)",
-         args={"database": "POC", "collection": "semantic_cache",
-               "query": user_msg,
-               "filter": {"area": {"$in": ["global", area]}}},
-         result=(f"CACHE HIT — score {cache_res['score']} ≥ {cache_res['threshold']}. "
-                 f"Resposta servida do MongoDB, sem LLM."
-                 if cache_res["hit"] else
-                 f"CACHE MISS — melhor score {cache_res['score']} < {cache_res['threshold']}."),
-         reads=metrics["reads"], writes=metrics["writes"], latency_ms=cache_res["latency_ms"])
+    # Mensagem com sinal pessoal (preferência, tratamento, "me chame de X") depende
+    # da memória DESTE usuário — nunca é servida pelo cache compartilhado da área.
+    personal_turn = memory.should_extract(user_msg)
+    if personal_turn:
+        cache_res = {"hit": False, "score": 0.0, "threshold": None, "answer": None,
+                     "question": None, "source_id": None, "latency_ms": 0,
+                     "mode": "bypass"}
+        emit("retrieve", "message", actor="agent",
+             text="Cache semântico ignorado: a mensagem é pessoal (preferência/"
+                  "tratamento) e depende da memória de longo prazo do usuário.")
+    else:
+        cache_res = await cache.lookup(user_msg, area)
+        metrics["reads"] += 1
+        emit("retrieve", "tool_call", actor="mongodb",
+             tool="$vectorSearch (semantic_cache)",
+             args={"database": "POC", "collection": "semantic_cache",
+                   "query": user_msg,
+                   "filter": {"area": {"$in": ["global", area]}}},
+             result=(f"CACHE HIT — score {cache_res['score']} ≥ {cache_res['threshold']}. "
+                     f"Resposta servida do MongoDB, sem LLM."
+                     if cache_res["hit"] else
+                     f"CACHE MISS — melhor score {cache_res['score']} < {cache_res['threshold']}."),
+             reads=metrics["reads"], writes=metrics["writes"],
+             latency_ms=cache_res["latency_ms"])
 
     if cache_res["hit"]:
         final_answer = cache_res["answer"]

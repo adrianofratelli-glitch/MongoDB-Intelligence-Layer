@@ -114,7 +114,7 @@ Collection: `POC.agent_memory` — **um documento por fato** (schema v2): `{user
 
 ### Gate de extração (`memory.should_extract`, `memory.py:77-79`)
 
-Regex de domínio em português (`_DURABLE_SIGNAL_RE`) — detecta sinal de identidade/preferência/histórico ("meu nome", "prefiro", "moro em" etc.) antes de pagar uma chamada de extração. **É uma heurística documentada, não um classificador** — limite conhecido da PoV, não "conserta" isoladamente.
+Lista de frases do domínio em português (`_DURABLE_PHRASES`, match sobre texto sem acento e sem pontuação, sem regex) — detecta sinal de identidade/preferência/histórico ("meu nome", "prefiro", "moro em" etc.) antes de pagar uma chamada de extração. O mesmo sinal faz o turno **ignorar o cache semântico** (`cache.mode = bypass`) e impede a gravação da resposta no cache: preferência/tratamento/recall dependem da memória do usuário, nunca do cache compartilhado da área. O prompt do extrator aceita preferências do próprio cliente (tratamento, orçamento, canal) reescritas em 3ª pessoa e recusa instruções que tentem alterar política/segurança do agente. **É uma heurística documentada, não um classificador** — limite conhecido da PoV, não "conserta" isoladamente.
 
 ### Extração (`memory.extract_and_store`, `memory.py:323-462`)
 
