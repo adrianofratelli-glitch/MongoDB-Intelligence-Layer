@@ -772,6 +772,9 @@ VECTOR_INDEXES = [
      "path": "phrase", "filters": ["area"]},
     {"db": "POC", "collection": "agent_memory", "name": "agent_memory_vs",
      "path": "fact", "filters": ["user_key", "active"]},
+    # Classificador de turno pessoal vs genérico (turn_classifier.py)
+    {"db": "ai_brain", "collection": "turn_probes", "name": "turn_probes_vs",
+     "path": "phrase", "filters": []},
 ]
 
 # BM25 (Atlas Search) sobre os fatos: metade lexical do retrieval híbrido da
@@ -1108,6 +1111,8 @@ def main():
 
     print("\nÍndices vetoriais (autoEmbed voyage-4):")
     create_vector_indexes(client)
+    from seed_turn_probes import seed_probes_and_config
+    seed_probes_and_config(client["ai_brain"])
 
 
 if __name__ == "__main__":

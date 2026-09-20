@@ -10,6 +10,7 @@ The MCP session is long-lived (opened once in the FastAPI lifespan) and reused.
 """
 
 import asyncio
+import math
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ from mcp.client.stdio import stdio_client
 import cache
 import guardrails
 import memory
+import turn_classifier
 import profiles
 from db import MAX_TIME_MS, poc
 from graph import build_order_chain_pipeline, summarize_order_chain
@@ -277,9 +279,31 @@ def _graph_order_id(tool_input: dict) -> str | None:
     return candidate if ORDER_ID_RE.fullmatch(candidate) else None
 
 
+CATALOG_BUDGET_WIDEN = 200       # candidatos lidos antes do corte de preço (3 finais)
+CATALOG_BUDGET_CANDIDATES = 500  # numCandidates da busca ampliada (>= WIDEN)
+# Por que tão largo: o índice do catálogo não tem `preco` como campo de filtro
+# (somente leitura), e o ranking semântico agrupa itens caros ("fone de ouvido" →
+# 50 primeiros acima de R$ 1.245). Janela de 200 acha opções baratas; ~1,3 s a
+# mais por busca, só para quem tem orçamento. O ideal é `preco` filter no índice.
+
+
+def _valid_budget(budget) -> float | None:
+    """Orçamento só vale se for número finito e positivo (nunca string/NaN)."""
+    if isinstance(budget, bool) or not isinstance(budget, (int, float)):
+        return None
+    budget = float(budget)
+    return budget if math.isfinite(budget) and budget > 0 else None
+
+
 def _read_denial(tool_name: str, target: str, tool_input: dict,
-                 conversation_id: str, user_key: str) -> str | None:
-    """Enforce least privilege for reads before the MCP server is called."""
+                 conversation_id: str, user_key: str,
+                 budget_brl: float | None = None) -> str | None:
+    """Enforce least privilege for reads before the MCP server is called.
+
+    `budget_brl`: limite de preço do cliente vindo da memória de longo prazo. Na
+    busca de catálogo ele vira um `$match` montado pelo servidor — o modelo não
+    consegue ignorá-lo nem substituí-lo, ao contrário de uma instrução no prompt.
+    """
     if tool_name == "find":
         if target == "POC.support_orders":
             order_id = _specific_order_id(tool_input)
@@ -354,11 +378,30 @@ def _read_denial(tool_name: str, target: str, tool_input: dict,
         database, collection = tool_input.get("database"), tool_input.get("collection")
         tool_input.clear()
         tool_input.update({"database": database, "collection": collection})
+        budget = _valid_budget(budget_brl)
+        if budget is None:
+            tool_input["pipeline"] = [
+                {"$vectorSearch": {
+                    "index": "produtos_vector", "path": "descricao",
+                    "query": query.strip(), "numCandidates": candidates, "limit": limit,
+                }},
+                {"$project": {"nome": 1, "preco": 1, "_id": 0}},
+            ]
+            return None
+        # Com orçamento: o índice do catálogo não tem `preco` como campo de filtro
+        # (dataset/índice são somente leitura), então lê-se mais candidatos, corta
+        # por preço no servidor e só então limita — senão o corte poderia zerar o
+        # resultado mesmo havendo produtos baratos logo abaixo no ranking.
+        widened = max(limit, CATALOG_BUDGET_WIDEN)
         tool_input["pipeline"] = [
             {"$vectorSearch": {
                 "index": "produtos_vector", "path": "descricao",
-                "query": query.strip(), "numCandidates": candidates, "limit": limit,
+                "query": query.strip(),
+                "numCandidates": max(candidates, widened, CATALOG_BUDGET_CANDIDATES),
+                "limit": widened,
             }},
+            {"$match": {"preco": {"$lte": budget}}},
+            {"$limit": limit},
             {"$project": {"nome": 1, "preco": 1, "_id": 0}},
         ]
         return None
@@ -852,7 +895,8 @@ async def _run_tool_loop(session, tools, system_static, system_dynamic, user_msg
                          emit, metrics, model,
                          conversation_id: str, user_key: str,
                          history: list[dict] | None = None,
-                         fallback_model: str | None = None) -> str:
+                         fallback_model: str | None = None,
+                         budget_brl: float | None = None) -> str:
     """The core Claude ↔ MongoDB MCP tool-use loop. Returns the final answer text.
 
     `history` são os turnos recentes vindos de POC.agent_sessions (memória curta
@@ -930,7 +974,8 @@ async def _run_tool_loop(session, tools, system_static, system_dynamic, user_msg
             tool_input = dict(tu.input)
             target = f'{tool_input.get("database", "?")}.{tool_input.get("collection", "?")}'
             denial = (_write_denial(tu.name, target, tool_input, user_key) if is_write
-                      else _read_denial(tu.name, target, tool_input, conversation_id, user_key))
+                      else _read_denial(tu.name, target, tool_input, conversation_id, user_key,
+                                        budget_brl=budget_brl))
             if denial:
                 # escrita fora da política (collection ou filtro amplo): negada
                 # ANTES de tocar o MCP. A negação segue intacta; o anexo diz ao
@@ -1318,6 +1363,30 @@ async def run_agent(
              reads=metrics["reads"], writes=metrics["writes"],
              latency_ms=cache_res["latency_ms"])
 
+    # Rede de segurança semântica: o portão de frases só pega o óbvio. Antes de
+    # servir uma resposta do cache compartilhado, o classificador ($vectorSearch em
+    # ai_brain.turn_probes) confirma que o turno não depende da memória do usuário.
+    # Falha fechado: índice fora do ar ⇒ trata como pessoal (vai ao LLM, sem cache).
+    if cache_res["hit"] and not personal_turn:
+        turn_cls = await turn_classifier.classify(user_msg)
+        metrics["reads"] += 1
+        emit("retrieve", "tool_call", actor="mongodb",
+             tool="$vectorSearch (turn_probes)",
+             args={"database": "ai_brain", "collection": "turn_probes",
+                   "query": user_msg},
+             result=("Classificador indisponível — por segurança o cache é ignorado."
+                     if turn_cls["error"] else
+                     f"Turno {'PESSOAL' if turn_cls['personal'] else 'genérico'} — "
+                     f"score {turn_cls['score']} vs limiar {turn_cls['threshold']}."),
+             reads=metrics["reads"], writes=metrics["writes"],
+             latency_ms=turn_cls["latency_ms"])
+        if turn_cls["personal"]:
+            personal_turn = True
+            cache_res = {"hit": False, "score": cache_res["score"],
+                         "threshold": cache_res["threshold"], "answer": None,
+                         "question": None, "source_id": None,
+                         "latency_ms": cache_res["latency_ms"], "mode": "bypass"}
+
     if cache_res["hit"]:
         final_answer = cache_res["answer"]
         # No LLM call happens on a hit — there's no real provider usage to report,
@@ -1340,12 +1409,18 @@ async def run_agent(
     # a memória não é despejada inteira no prompt — é uma QUERY pela pergunta.
     # LATÊNCIA: memória longa, histórico curto e lista de tools são independentes
     # entre si — rodam em PARALELO em vez de somar três round-trips sequenciais.
-    ltm, (history, history_summary), tools = await asyncio.gather(
+    ltm, (history, history_summary), tools, budget_brl = await asyncio.gather(
         memory.load_relevant(user_key, user_msg),
         _load_recent_history(conversation_id, user_key),
         list_agent_tools(session),
+        memory.active_budget(user_key),
     )
     metrics["reads"] += 1
+    if budget_brl:
+        emit("retrieve", "message", actor="mongodb",
+             text=f"Orçamento do cliente (memória de longo prazo): R$ {budget_brl:,.2f}. "
+                  "O servidor aplica esse teto como $match no catálogo — "
+                  "o modelo não consegue ignorá-lo.")
     if ltm.get("facts"):
         mode = ltm.get("mode")
         semantic = mode in ("vector", "hybrid")
@@ -1409,8 +1484,15 @@ async def run_agent(
     )
     # Estático (cacheável entre turnos/conversas da área) vs dinâmico (por turno)
     system_static = SYSTEM + persona_block
+    budget_block = (
+        f"\n\nOrçamento do cliente: R$ {budget_brl:,.2f}. A busca de catálogo já "
+        "devolve somente itens dentro desse teto (filtro aplicado pelo sistema). Se "
+        "voltar vazia, diga que não há opção dentro do orçamento — nunca que o "
+        "produto está indisponível — e ofereça alternativas ou categorias próximas."
+        if budget_brl else ""
+    )
     system_dynamic = (_memory_note(conversation_id) + memory.format_for_prompt(ltm)
-                      + summary_block)
+                      + budget_block + summary_block)
 
     # ---- Agent tool-use loop --------------------------------------------------
     try:
@@ -1419,7 +1501,7 @@ async def run_agent(
                 session, tools, system_static, system_dynamic, user_msg, emit,
                 metrics, agent_model,
                 conversation_id, user_key, history=history,
-                fallback_model=agent_fallback_model,
+                fallback_model=agent_fallback_model, budget_brl=budget_brl,
             ),
             timeout=AGENT_TURN_TIMEOUT_SECONDS,
         )
@@ -1502,7 +1584,14 @@ async def run_agent(
         # ficou salva...") as if it were generic, poisoning the shared cache for
         # the whole area with a false "sua preferência foi salva" promise.
         personalized = (bool(new_facts) or bool(superseded)
-                        or bool(ltm.get("facts")) or mem_task is not None)
+                        or bool(ltm.get("facts")) or mem_task is not None
+                        or personal_turn)
+        if not personalized:
+            # Última barreira: mesmo sem sinal de frase nem fatos, uma pergunta
+            # semanticamente pessoal não pode ir para o cache compartilhado.
+            store_cls = await turn_classifier.classify(user_msg)
+            metrics["reads"] += 1
+            personalized = store_cls["personal"]
         if not personalized:
             await cache.store(user_msg, final_answer, agent_model, area=area)
             metrics["writes"] += 1

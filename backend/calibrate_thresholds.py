@@ -71,6 +71,28 @@ DENYLIST_PROBES = [
 ]
 
 
+# Classificador de turno (turn_classifier.py): True = turno PESSOAL (depende da
+# memória do usuário), False = genérico. Frases distintas das semeadas em
+# ai_brain.turn_probes — medir contra o próprio seed só mediria o índice.
+TURN_PROBES = [
+    (True, "me fala o que você tem anotado sobre o meu perfil", None),
+    (True, "qual era mesmo o valor máximo que eu topo pagar?", None),
+    (True, "como você costuma me chamar?", None),
+    (True, "você guardou o meu jeito de ser tratado?", None),
+    (True, "anota aí que eu prefiro receber por SMS", None),
+    (True, "o que você já sabe sobre mim?", None),
+    (False, "como faço para trocar um produto?", None),
+    (False, "qual o prazo de entrega para São Paulo?", None),
+    (False, "quais formas de pagamento vocês aceitam?", None),
+    (False, "como funciona a garantia dos produtos?", None),
+    (False, "qual é a política de reembolso?", None),
+    (False, "recomende um fone de ouvido bluetooth", None),
+    (False, "quem é o presidente do brasil?", None),
+    (False, "como você pode me ajudar?", None),
+    (False, "quais produtos estão em promoção?", None),
+]
+
+
 def top_score(coll, index: str, path: str, query: str, area: str | None = None) -> float:
     """Maior score da busca — com o MESMO pré-filtro de área que roda em runtime.
 
@@ -136,6 +158,9 @@ def main() -> None:
     deny_thr = calibrate(poc["guardrail_denylist"], "guardrail_denylist_vs", "phrase",
                          DENYLIST_PROBES, "Denylist semântico (POC.guardrail_denylist)")
 
+    turn_thr = calibrate(ai_brain["turn_probes"], "turn_probes_vs", "phrase",
+                         TURN_PROBES, "Classificador de turno (ai_brain.turn_probes)")
+
     # Threshold POR ÁREA, quando a área tem probes próprios dos dois lados. Uma
     # área só pode ser "mais rígida" se a medição dela sustentar isso: um delta
     # fixo aplicado por cima do global já colocou o Financeiro abaixo de um
@@ -166,6 +191,15 @@ def main() -> None:
                       "calibration.method": "backend/calibrate_thresholds.py"}},
         )
         print(f"✓ cache_config.hit_threshold ← {cache_thr}")
+    if turn_thr is not None:
+        ai_brain["turn_classifier_config"].update_one(
+            {"active": True},
+            {"$set": {"threshold": turn_thr, "updated_at": now,
+                      "calibration.measured_at": now.strftime("%Y-%m-%d"),
+                      "calibration.method": "backend/calibrate_thresholds.py"}},
+            upsert=True,
+        )
+        print(f"✓ turn_classifier_config.threshold ← {turn_thr}")
     if deny_thr is not None:
         # Áreas com threshold próprio medido ficam de fora do update global —
         # elas recebem o valor da própria medição logo abaixo.

@@ -26,6 +26,7 @@ relevant known facts, and flags which old fact each new one replaces (if any).
 """
 
 import json
+import math
 import unicodedata
 from datetime import datetime, timezone
 
@@ -89,6 +90,24 @@ def _utcnow() -> datetime:
 
 def _norm(text: str) -> str:
     return " ".join(text.lower().split())
+
+
+def _clean_budget(value) -> float | None:
+    """Limite de preço só vale se for número finito e positivo."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) and value > 0 else None
+
+
+async def active_budget(user_key: str) -> float | None:
+    """Limite de preço ativo do cliente (R$), ou None. Lido pelo servidor para
+    filtrar o catálogo — é dado estruturado do fato, não texto do prompt."""
+    doc = await safe_query(poc()[MEMORY_COLLECTION].find_one(
+        {"user_key": user_key, "active": True, "max_price_brl": {"$gt": 0}},
+        {"max_price_brl": 1}, sort=[("created_at", -1)], max_time_ms=MAX_TIME_MS,
+    ))
+    return _clean_budget((doc or {}).get("max_price_brl"))
 
 
 def should_extract(user_message: str) -> bool:
@@ -322,6 +341,13 @@ _EXTRACT_SCHEMA = {
                         "type": "string",
                         "enum": ["identidade", "preferencia", "historico", "contexto"],
                     },
+                    "max_price_brl": {
+                        "type": "number",
+                        "description": (
+                            "Se o fato é um LIMITE MÁXIMO de preço/orçamento do cliente, "
+                            "o valor em reais (ex.: 800). 0 para qualquer outro fato."
+                        ),
+                    },
                     "replaces": {
                         "type": "integer",
                         "description": (
@@ -330,7 +356,7 @@ _EXTRACT_SCHEMA = {
                         ),
                     },
                 },
-                "required": ["fact", "category", "replaces"],
+                "required": ["fact", "category", "max_price_brl", "replaces"],
                 "additionalProperties": False,
             },
         }
@@ -392,6 +418,8 @@ async def extract_and_store(user_key: str, user_message: str, session_id: str,
             "sobre o cliente. Se não houver nada durável, retorne uma lista vazia.\n\n"
             "Fatos JÁ CONHECIDOS sobre este cliente:\n"
             f"{known_list}\n\n"
+            "Quando o fato for um limite de preço/orçamento, preencha também "
+            "`max_price_brl` com o valor numérico em reais.\n\n"
             "Se um fato novo CONTRADIZ ou ATUALIZA um fato conhecido (ex.: mudou a "
             "preferência de contato), preencha `replaces` com o número do fato "
             "substituído. Não repita fatos que já constam da lista sem mudança."
@@ -423,13 +451,26 @@ async def extract_and_store(user_key: str, user_message: str, session_id: str,
             continue
         idx = int(c.get("replaces") or 0)
         old_id = known_docs[idx - 1]["_id"] if 0 < idx <= len(known_docs) else None
-        writes.append((
-            {"user_key": user_key, "fact": fact, "fact_norm": _norm(fact),
-             "category": c.get("category", "contexto"), "active": True,
-             "source_session": session_id, "created_at": now, "updated_at": now,
-             "superseded_by": None},
-            old_id,
-        ))
+        budget = _clean_budget(c.get("max_price_brl"))
+        if budget and old_id is None:
+            # Só pode haver UM limite de preço ativo: um novo limite substitui o
+            # anterior mesmo que o extrator não tenha apontado `replaces` — senão
+            # dois orçamentos ativos disputariam o filtro de catálogo.
+            prev = await poc()[MEMORY_COLLECTION].find_one(
+                {"user_key": user_key, "active": True, "max_price_brl": {"$gt": 0}},
+                sort=[("created_at", -1)], max_time_ms=MAX_TIME_MS,
+            )
+            if prev is not None:
+                old_id = prev["_id"]
+                if all(d["_id"] != old_id for d in known_docs):
+                    known_docs.append(prev)
+        doc = {"user_key": user_key, "fact": fact, "fact_norm": _norm(fact),
+               "category": c.get("category", "contexto"), "active": True,
+               "source_session": session_id, "created_at": now, "updated_at": now,
+               "superseded_by": None}
+        if budget:
+            doc["max_price_brl"] = budget
+        writes.append((doc, old_id))
     # Enforce the active-memory ceiling, rather than merely limiting what is read.
     active_count = await safe_query(
         poc()[MEMORY_COLLECTION].count_documents(

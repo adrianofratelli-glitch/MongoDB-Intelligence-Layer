@@ -116,6 +116,14 @@ Collection: `POC.agent_memory` — **um documento por fato** (schema v2): `{user
 
 Lista de frases do domínio em português (`_DURABLE_PHRASES`, match sobre texto sem acento e sem pontuação, sem regex) — detecta sinal de identidade/preferência/histórico ("meu nome", "prefiro", "moro em" etc.) antes de pagar uma chamada de extração. O mesmo sinal faz o turno **ignorar o cache semântico** (`cache.mode = bypass`) e impede a gravação da resposta no cache: preferência/tratamento/recall dependem da memória do usuário, nunca do cache compartilhado da área. O prompt do extrator aceita preferências do próprio cliente (tratamento, orçamento, canal) reescritas em 3ª pessoa e recusa instruções que tentem alterar política/segurança do agente. **É uma heurística documentada, não um classificador** — limite conhecido da PoV, não "conserta" isoladamente.
 
+### Classificador de turno pessoal (`turn_classifier.py`)
+
+O gate de frases só pega o óbvio; paráfrases ("como devo ser tratado por você?") passariam para o cache compartilhado da área. O classificador é um `$vectorSearch` em `ai_brain.turn_probes` (índice `turn_probes_vs`, autoEmbed voyage-4) com frases-exemplo de turnos pessoais; o vizinho mais próximo acima do limiar (`ai_brain.turn_classifier_config.threshold`, **medido** por `calibrate_thresholds.py`, nunca fixado à mão) marca o turno como pessoal. Roda só quando importa: num **HIT** de cache (antes de servir a resposta) e **antes de gravar** no cache. **Falha fechado**: índice fora do ar ⇒ turno tratado como pessoal (vai ao LLM, sem cache). Semeado por `seed_turn_probes.py` (idempotente, não toca no resto) e por `seed.py`.
+
+### Orçamento aplicado pelo servidor (`memory.active_budget` + `agent._read_denial`)
+
+O extrator devolve `max_price_brl` estruturado no fato de limite de preço; um novo limite supersede o anterior automaticamente (só um ativo). Na busca de catálogo o servidor reescreve o pipeline com `$match: {preco: {$lte: orçamento}}` — o modelo não consegue ignorá-lo nem substituí-lo. Como `preco` não é campo `filter` do índice `produtos_vector` (somente leitura), a busca lê 200 candidatos (`numCandidates` 500) antes do corte e limita a 3; custa ~1,3 s a mais, só para quem tem orçamento. O ideal, se o índice do catálogo puder mudar, é `preco` como campo `filter` (pré-filtro nativo).
+
 ### Extração (`memory.extract_and_store`, `memory.py:323-462`)
 
 Chamada Haiku (`EXTRACTOR_MODEL = "claude-haiku-4-5"`) com output estruturado (`json_schema`), que recebe a mensagem do turno + a lista de fatos JÁ CONHECIDOS relevantes (do retrieval híbrido) e devolve fatos novos, cada um com `category` e `replaces` (índice do fato que ele substitui, ou 0 se é novo). O prompt do extrator recusa explicitamente "fatos" em forma de instrução/comando — defesa contra prompt injection via memória.
