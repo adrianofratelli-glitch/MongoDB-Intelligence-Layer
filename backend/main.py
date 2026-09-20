@@ -328,23 +328,14 @@ async def api_metrics(request: Request):
     negócio (cache hits, bloqueios). Produção pluga OTel/Prometheus por cima."""
     auth.resolve_user_key(request, None)
     snap = observability.metrics.snapshot()
-    # Card "Economia": USD poupado pelos cache hits, estimado pelo custo médio
-    # REAL das chamadas LLM desta sessão (tokens medidos, preço Sonnet 4.x:
-    # $3/Mtok entrada, $15/Mtok saída). Sem chamadas ainda → economia 0.
+    # Heuristic savings uses complete measured turn costs, never a fixed tariff.
     c = snap["counters"]
-    calls = c.get("llm_calls", 0)
-    if calls:
-        total_usd = (c.get("llm_input_tokens", 0) * 3 +
-                     c.get("llm_output_tokens", 0) * 15) / 1_000_000
-        avg_usd = total_usd / calls
-        snap["savings"] = {
-            "cache_hits": c.get("cache_hits", 0),
-            "avg_llm_call_usd": round(avg_usd, 6),
-            "estimated_saved_usd": round(c.get("cache_hits", 0) * avg_usd, 4),
-        }
-    else:
-        snap["savings"] = {"cache_hits": c.get("cache_hits", 0),
-                           "avg_llm_call_usd": 0, "estimated_saved_usd": 0}
+    turns = c.get("priced_turns", 0)
+    avg = c.get("estimated_cost_nanousd", 0) / 1e9 / turns if turns and not c.get("unpriced_turns", 0) else None
+    snap["savings"] = {"cache_hits": c.get("cache_hits", 0),
+        "avg_llm_call_usd": avg,
+        "estimated_saved_usd": c.get("cache_hits", 0) * avg if avg is not None else None,
+        "basis": "heuristic: cache hits times mean observed turn cost; not invoice savings"}
     return snap
 
 

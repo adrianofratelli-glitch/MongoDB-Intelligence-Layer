@@ -8,33 +8,24 @@ import { api } from '../api.js';
 
 const modelBadge = (model) => (model?.includes('sonnet') ? 'blue' : 'yellow');
 
-// price per 1M tokens (input/output) — Anthropic API
-const PRICES = { sonnet: { in: 3, out: 15 }, haiku: { in: 1, out: 5 } };
-const family = (model) => (model?.includes('haiku') ? 'haiku' : 'sonnet');
-
-// aggregates real tokens/latency from the mini-chat responses, by model family
+// Cost comes from the measured provider ledger, including fallback attempts.
 function costStats(messages) {
   const byModel = {};
   for (const m of messages) {
-    if (!m.meta) continue;
-    const f = family(m.meta.model);
-    byModel[f] ??= { n: 0, inTok: 0, outTok: 0, latency: 0 };
-    byModel[f].n += 1;
-    byModel[f].inTok += m.meta.input_tokens;
-    byModel[f].outTok += m.meta.output_tokens;
-    byModel[f].latency += m.meta.latency_ms;
+    if (!m.meta?.llm_calls?.length) continue;
+    const key = m.meta.model;
+    const cost = m.meta.economics?.estimated_cost_usd;
+    byModel[key] ??= { n: 0, cost: 0, complete: true, latency: 0 };
+    const row = byModel[key];
+    row.n += 1;
+    row.complete &&= cost != null;
+    row.cost += cost || 0;
+    row.latency += m.meta.latency_ms || 0;
   }
-  return Object.entries(byModel).map(([f, s]) => {
-    const p = PRICES[f];
-    const perQuery = ((s.inTok / s.n) * p.in + (s.outTok / s.n) * p.out) / 1_000_000;
-    return {
-      family: f,
-      n: s.n,
-      avgLatency: Math.round(s.latency / s.n),
-      perQuery,
-      monthly: perQuery * 10_000 * 30,
-    };
-  });
+  return Object.entries(byModel).map(([model, s]) => ({family: model, n: s.n,
+    avgLatency: Math.round(s.latency / s.n),
+    perQuery: s.complete ? s.cost / s.n : null,
+    monthly: s.complete ? s.cost / s.n * 10000 * 30 : null}));
 }
 
 export default function ModelSwap({ state, setState }) {
@@ -183,7 +174,7 @@ export default function ModelSwap({ state, setState }) {
         </div>
       </div>
 
-      {savings && savings.cache_hits > 0 && (
+      {savings && savings.cache_hits > 0 && savings.estimated_saved_usd != null && (
         <div className="card neutral">
           <div className="card-header">
             <span className="card-title">Economia — cache semântico</span>
@@ -193,8 +184,8 @@ export default function ModelSwap({ state, setState }) {
             <div className="cost-item">
               <div className="cost-val">${savings.estimated_saved_usd.toFixed(4)}</div>
               <div className="cost-label">
-                poupado (~${savings.avg_llm_call_usd.toFixed(5)} por chamada LLM evitada,
-                custo médio real medido)
+                poupado (~${savings.avg_llm_call_usd.toFixed(5)} por turno evitado,
+                estimativa pela média observada; economia efetiva não medida)
               </div>
             </div>
           </div>
@@ -221,20 +212,20 @@ export default function ModelSwap({ state, setState }) {
               <div className="cost-item" key={s.family}>
                 <div className="row" style={{ marginBottom: 4 }}>
                   <Badge variant={s.family === 'sonnet' ? 'blue' : 'yellow'}>
-                    claude-{s.family}
+                    {s.family}
                   </Badge>
                   <span className="dim mono">{s.n} respostas · ~{s.avgLatency} ms</span>
                 </div>
-                <div className="cost-val">${s.monthly.toFixed(0)}/mês</div>
+                <div className="cost-val">{s.monthly != null ? `$${s.monthly.toFixed(0)}/mês` : 'Custo indisponível'}</div>
                 <div className="cost-label">
-                  ${s.perQuery.toFixed(5)} por query (tokens médios reais)
+                  {s.perQuery != null ? `$${s.perQuery.toFixed(5)} por query (estimativa Grove)` : 'Tarifa ou consumo ausente'}
                 </div>
               </div>
             ))}
           </div>
           <p className="dim" style={{ marginTop: 12, marginBottom: 0 }}>
             Trocar o modelo é um update_one — e a diferença de custo aparece aqui, calculada
-            com os tokens reais das respostas acima.
+            com os tokens reais e médias históricas do Grove. Projeção estimada, não cobrança exata.
           </p>
         </div>
       )}

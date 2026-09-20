@@ -1220,3 +1220,27 @@ footer.app-footer p {
 .execution-summary { margin: 8px 0; border: 1px solid #40565e; border-radius: 8px; padding: 10px 14px; font-size: 12px; }
 .execution-summary summary { cursor: pointer; font-weight: 600; }
 .execution-summary p { margin: 8px 0; }
+
+/* Progressive disclosure for model usage: calm summary, technical detail on demand. */
+.pov-execution { color: #e8edeb; background: #112733; border: 1px solid #3d4f58; border-radius: 12px; font-size: 13px; margin: 12px 0; overflow: hidden; }
+.pov-execution > summary { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; padding: 13px 16px; cursor: pointer; list-style: none; }
+.pov-execution > summary::-webkit-details-marker { display: none; }
+.pov-execution > summary:focus-visible { outline: 2px solid #00ed64; outline-offset: -3px; border-radius: 12px; }
+.pov-execution-title { font-weight: 600; margin-right: auto; }
+.pov-execution-metric { display: grid; gap: 2px; font-variant-numeric: tabular-nums; }
+.pov-execution-metric strong { font-size: 15px; font-weight: 600; }
+.pov-execution-metric small { color: #b8c4c8; font-size: 11px; }
+.pov-execution-mode { padding: 4px 8px; border-radius: 6px; background: #1c3642; color: #d2e4de; font-size: 12px; }
+.pov-execution-alert { color: #ffcf70; font-size: 12px; }
+.pov-execution-toggle { width: 16px; text-align: center; color: #b8c4c8; }
+.pov-execution-toggle::after { content: '+'; font-size: 20px; }
+.pov-execution[open] .pov-execution-toggle::after { content: '−'; }
+.pov-execution-body { border-top: 1px solid #3d4f58; padding: 14px 16px; }
+.pov-execution-body p { color: #c1c7c6; line-height: 1.5; margin: 0 0 12px; }
+.pov-execution-calls { list-style: none; margin: 0; padding: 0; }
+.pov-execution-calls li { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 0; border-bottom: 1px solid #304550; }
+.pov-execution-calls li > div:first-child { display: grid; gap: 3px; overflow-wrap: anywhere; }
+.pov-execution-calls li > div:first-child > span { color: #c1c7c6; }
+.pov-execution-call-meta { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; color: #b8c4c8; font-size: 12px; font-variant-numeric: tabular-nums; }
+.pov-execution-body .pov-execution-disclaimer { margin: 12px 0 0; font-size: 11px; color: #b8c4c8; }
+@media (max-width: 600px) { .pov-execution > summary { gap: 12px; padding: 12px; } .pov-execution-title { flex-basis: 100%; } .pov-execution-mode { max-width: 100%; } .pov-execution-toggle { margin-left: auto; } .pov-execution-body { padding: 12px; } }

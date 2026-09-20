@@ -42,6 +42,12 @@ def metered_turn(fn):
         try:
             result = await fn(*args, **kwargs)
             result.update(llm_calls=calls, economics=economics(calls))
+            if calls:
+                import observability
+                cost = result['economics']['estimated_cost_usd']
+                observability.metrics.bump('priced_turns' if cost is not None else 'unpriced_turns')
+                if cost is not None:
+                    observability.metrics.bump('estimated_cost_nanousd', round(cost * 1e9))
             return result
         finally:
             _calls.reset(token)
@@ -133,7 +139,7 @@ class GatewayClient:
         self.role = role
         self.messages = self
         key = os.getenv('GROVE_API_KEY')
-        base = os.getenv('GROVE_ANTHROPIC_BASE_URL') if key else os.getenv('ANTHROPIC_BASE_URL')
+        base = (os.getenv('GROVE_ANTHROPIC_BASE_URL') or 'https://grove-gateway-prod.azure-api.net/grove-foundry-prod/anthropic') if key else os.getenv('ANTHROPIC_BASE_URL')
         kwargs = {}
         if base:
             checked_url(base)
@@ -172,6 +178,8 @@ class GatewayClient:
                     usage={'input_tokens': max(0, u.get('prompt_tokens', 0) - cached),
                            'output_tokens': u.get('completion_tokens', 0), 'cache_read_input_tokens': cached})
             record['status'] = 'ok' if response.stop_reason in {'end_turn', 'tool_use'} else 'incomplete'
+            if record['status'] == 'incomplete':
+                raise RuntimeError('Incomplete model response; tool execution withheld')
             return response
         except httpx.HTTPStatusError as exc:
             raise APIStatusError('Grove request failed', response=exc.response, body=None) from None

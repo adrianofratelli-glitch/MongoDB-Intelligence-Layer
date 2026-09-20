@@ -57,20 +57,8 @@ def log_generation(trace, *, name: str, model: str, input_text: str,
     if trace is None:
         return
     try:
-        trace.generation(
-            name=name, model=model,
-            input=input_text, output=output_text,
-            usage={
-                "input": usage.get("input_tokens", 0),
-                "output": usage.get("output_tokens", 0),
-                "unit": "TOKENS",
-            },
-            metadata={
-                "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
-                "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
-                "latency_ms": latency_ms,
-            },
-        )
+        trace.span(name=name, input=input_text, output=output_text,
+                   metadata={"model": model, "latency_ms": latency_ms, "kind": "reasoning_text"})
     except Exception:  # noqa: BLE001
         logger.exception("falha ao logar generation no Langfuse")
 
@@ -91,6 +79,12 @@ def finish_trace(trace, *, output_text: str | None = None):
     if trace is None:
         return
     try:
+        from gateway import _calls
+        for call in _calls.get() or []:
+            trace.generation(name=call['agent'], model=call['model'],
+                             metadata=call,
+                             usage={"input": call.get('input_tokens', 0) + call.get('cache_read_tokens', 0) + call.get('cache_write_tokens', 0),
+                                    "output": call.get('output_tokens', 0), "unit": "TOKENS"} if call.get('usage_known') else None)
         if output_text is not None:
             trace.update(output=output_text)
     except Exception:  # noqa: BLE001

@@ -1,0 +1,58 @@
+[
+  {
+    "passed": true,
+    "llm_calls": [
+      {
+        "agent": "test_tool_contract",
+        "model": "claude-haiku-4-5",
+        "fallback": false,
+        "started_at": "2026-09-19T20:32:47.343432+00:00",
+        "status": "ok",
+        "usage_known": true,
+        "estimated_cost_usd": 0.0015192,
+        "latency_ms": 2051.97,
+        "input_tokens": 581,
+        "output_tokens": 52,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "blended_rate_usd_per_mtok": 2.4
+      }
+    ],
+    "economics": {
+      "estimated_cost_usd": 0.0015192,
+      "known_cost_usd": 0.0015192,
+      "cost_complete": true,
+      "cost_basis": "historical_blended_estimate",
+      "measurement_scope": "Observed Grove average; estimate, not invoice"
+    },
+    "latency_ms": 2089
+  },
+  {
+    "passed": true,
+    "llm_calls": [
+      {
+        "agent": "test_tool_contract",
+        "model": "gpt-5.6-luna",
+        "fallback": false,
+        "started_at": "2026-09-19T20:32:49.402842+00:00",
+        "status": "ok",
+        "usage_known": true,
+        "estimated_cost_usd": 6.346e-05,
+        "latency_ms": 1812.98,
+        "input_tokens": 151,
+        "output_tokens": 16,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "blended_rate_usd_per_mtok": 0.38
+      }
+    ],
+    "economics": {
+      "estimated_cost_usd": 6.346e-05,
+      "known_cost_usd": 6.346e-05,
+      "cost_complete": true,
+      "cost_basis": "historical_blended_estimate",
+      "measurement_scope": "Observed Grove average; estimate, not invoice"
+    },
+    "latency_ms": 1819
+  }
+]

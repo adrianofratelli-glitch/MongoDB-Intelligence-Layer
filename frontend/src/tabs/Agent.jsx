@@ -6,6 +6,7 @@ import TextInput from '@leafygreen-ui/text-input';
 import { api } from '../api.js';
 import ReplacementChain from '../components/ReplacementChain.jsx';
 import QueryDetails from '../components/QueryDetails.jsx';
+import ExecutionSummary from '../components/ExecutionSummary.jsx';
 
 // Prova visual do pitch "MongoDB reduz custo de LLM", direto na PoV — sem precisar
 // abrir o Langfuse para ver. Duas camadas de cache SÃO dados reais deste turno,
@@ -20,17 +21,10 @@ function MongoCacheSavings({ run }) {
   const parallel = calls.some((a, i) => calls.slice(i + 1).some(b => a.agent !== b.agent &&
     Math.max(Date.parse(a.started_at), Date.parse(b.started_at)) <
     Math.min(Date.parse(a.started_at) + a.latency_ms, Date.parse(b.started_at) + b.latency_ms)));
-  return <details className="execution-summary">
-    <summary>Resumo do turno · {calls.length} chamadas · {cost != null ? `$${cost.toFixed(4)} USD estimados` : 'Custo indisponível'}
-      {' · '}{run.cache?.hit ? 'Resposta em cache' : parallel ? 'Agente + memória em paralelo' : 'Loop de um agente'}</summary>
-    <p>Estimativa pelas médias observadas no Grove; não representa cobrança exata.</p>
-    <p>As etapas de raciocínio e ferramentas pertencem ao mesmo agente. A extração de memória pode executar em paralelo.</p>
-    {calls.map((call, i) => <div className="cache-savings-row" key={i}>
-      <span>{call.agent === 'memory_extractor' ? 'Memória' : 'Atendimento'} · {call.model}{call.fallback ? ' · fallback' : ''}</span>
-      <span>{call.status} · {Math.round(call.latency_ms)} ms · {call.usage_known ? `${call.input_tokens + call.output_tokens + call.cache_read_tokens + call.cache_write_tokens} tokens` : 'consumo não informado'}</span>
-    </div>)}
-    {!!calls.length && <p>Tokens de cache reutilizados: {calls.reduce((n, c) => n + (c.cache_read_tokens || 0), 0)}.</p>}
-  </details>;
+  const blocked = run.guardrail?.input?.action === 'block';
+  return <ExecutionSummary calls={calls} cost={cost}
+    mode={run.cache?.hit ? 'Resposta em cache' : blocked ? 'Bloqueado pela política' : !calls.length ? 'Sem uso de LLM' : parallel ? 'Atendimento + memória em paralelo' : 'Loop de um agente'}
+    note={run.cache?.hit ? 'Resposta reaproveitada do cache semântico do MongoDB.' : 'Um agente alterna raciocínio e ferramentas MCP. A extração de memória é uma etapa auxiliar e pode ocorrer em paralelo.'} />;
 }
 
 // As 6 fases do loop agêntico (mesma narrativa do Perceive→Reason→Act→Store).
@@ -46,7 +40,7 @@ const PHASES = [
 const PHASE_CAPTION = {
   perceive: 'O agente recebe a mensagem do cliente — início do turno.',
   retrieve: 'O agente consulta o MongoDB pelo MCP Server (find / $vectorSearch).',
-  reason: 'O Claude raciocina sobre qual será a próxima ação.',
+  reason: 'O modelo raciocina sobre qual será a próxima ação.',
   act: 'O agente grava a decisão no MongoDB (update do pedido).',
   store: 'O turno é salvo em agent_sessions — memória persistida da conversa.',
   loop: 'Turno concluído. O agente está pronto para continuar a conversa.',

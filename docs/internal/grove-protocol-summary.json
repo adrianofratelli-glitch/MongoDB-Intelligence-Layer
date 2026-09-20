@@ -1,0 +1,12 @@
+{
+  "total": 2,
+  "passed": 2,
+  "pass_rate": 1.0,
+  "p95_ms": 2089,
+  "llm_calls": 2,
+  "cost_coverage": 1.0,
+  "estimated_cost_usd": 0.00158266,
+  "known_cost_usd": 0.00158266,
+  "cost_per_success_usd": 0.00079133,
+  "measurement_scope": "Task assertions supplied by evaluation; observed Grove blended estimates"
+}

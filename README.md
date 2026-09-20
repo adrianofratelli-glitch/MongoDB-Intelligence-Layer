@@ -96,3 +96,7 @@ Docker: `docker build -t intelligence-layer-poc . && docker run --env-file .env 
 
 Defina `ENVIRONMENT=production`, `AUTH_REQUIRED=1` e `DEMO_TOKEN_ISSUANCE_ENABLED=0`. A inicialização rejeita segredos de JWT ou admin fracos/padrão e CORS com curinga; o `/metrics` exige autorização de admin. Nomes de modelo e caminhos de update passam por allowlist para evitar injeção de campos com ponto ou `$`. A imagem roda como UID 10001 atrás do nginx com cabeçalhos de segurança.
 
+
+## Gateway e custos da POV
+
+Integração Grove para Claude e GPT, custos estimados por chamada e resumo compacto de execução: [guia interno e validação](docs/internal/gateway-economics.md). Os modelos principais existentes foram preservados.
