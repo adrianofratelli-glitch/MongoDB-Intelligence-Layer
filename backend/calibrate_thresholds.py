@@ -81,6 +81,12 @@ TURN_PROBES = [
     (True, "você guardou o meu jeito de ser tratado?", None),
     (True, "anota aí que eu prefiro receber por SMS", None),
     (True, "o que você já sabe sobre mim?", None),
+    (True, "qual o nome pelo qual você me conhece?", None),
+    (True, "guardou aquilo do meu limite de gastos?", None),
+    (True, "atende só por whatsapp comigo, ok?", None),
+    (True, "como está o meu perfil aí no sistema?", None),
+    (True, "o meu jeito de ser chamado mudou, atualiza aí", None),
+    (True, "me lembra o que combinamos sobre o valor máximo", None),
     (False, "como faço para trocar um produto?", None),
     (False, "qual o prazo de entrega para São Paulo?", None),
     (False, "quais formas de pagamento vocês aceitam?", None),
@@ -90,6 +96,12 @@ TURN_PROBES = [
     (False, "quem é o presidente do brasil?", None),
     (False, "como você pode me ajudar?", None),
     (False, "quais produtos estão em promoção?", None),
+    (False, "qual a diferença entre 4K e Full HD?", None),
+    (False, "vocês entregam em domicílio?", None),
+    (False, "posso pagar em 10 vezes?", None),
+    (False, "como rastrear uma encomenda?", None),
+    (False, "qual o horário de atendimento?", None),
+    (False, "como cancelo uma compra?", None),
 ]
 
 
@@ -110,7 +122,25 @@ def top_score(coll, index: str, path: str, query: str, area: str | None = None) 
     return float(docs[0]["score"]) if docs else 0.0
 
 
-def calibrate(coll, index: str, path: str, probes: list[tuple[bool, str, str]], label: str):
+def _best_with_errors(scored_pos, scored_neg):
+    """Limiar que minimiza (falsos negativos + falsos positivos) — medido, não chutado.
+
+    Candidatos = pontos médios entre scores vizinhos. Empate → menos falsos
+    negativos (deixar passar um turno pessoal custa mais do que pular o cache)."""
+    scores = sorted({s for s, _ in scored_pos + scored_neg})
+    best = None
+    for lo, hi in zip(scores, scores[1:]):
+        thr = (lo + hi) / 2
+        fn = [t for s, t in scored_pos if s < thr]
+        fp = [t for s, t in scored_neg if s >= thr]
+        key = (len(fn) + len(fp), len(fn), -thr)
+        if best is None or key < best[0]:
+            best = (key, thr, fn, fp)
+    return best[1], best[2], best[3]
+
+
+def calibrate(coll, index: str, path: str, probes: list[tuple[bool, str, str]], label: str,
+              allow_errors: bool = False):
     scored_pos: list[tuple[float, str]] = []
     scored_neg: list[tuple[float, str]] = []
     print(f"\n=== {label} ===")
@@ -128,11 +158,22 @@ def calibrate(coll, index: str, path: str, probes: list[tuple[bool, str, str]], 
         print(f"  ⚠ SEM SEPARAÇÃO: max(negativos)={lo:.6f} ≥ min(positivos)={hi:.6f}.")
         print(f"     negativo mais alto:  {worst_neg[1][:70]}")
         print(f"     positivo mais baixo: {worst_pos[1][:70]}")
-        print("     Nenhum threshold separa os dois. Adicione uma entrada seedada "
-              "cobrindo a intenção do positivo (ou revise o negativo) e remeça — "
-              "baixar o threshold na mão só trocaria falso-negativo por "
-              "falso-positivo.")
-        return None
+        thr, fn, fp = _best_with_errors(scored_pos, scored_neg)
+        thr = round(thr, 4)
+        print(f"     limiar de menor erro medido: {thr} — "
+              f"{len(fn)} falso(s) negativo(s), {len(fp)} falso(s) positivo(s)")
+        for t in fn:
+            print(f"       ✗ perdido (deveria casar): {t[:70]}")
+        for t in fp:
+            print(f"       ✗ falso alarme (não deveria casar): {t[:70]}")
+        if not allow_errors:
+            print("     Não gravo por padrão. Cubra o positivo perdido com uma entrada "
+                  "seedada (redação diferente do teste) e remeça, ou aceite o erro "
+                  "medido com --allow-errors. Baixar o threshold na mão só trocaria "
+                  "falso-negativo por falso-positivo.")
+            return None
+        print("     --allow-errors: gravando o limiar de menor erro medido.")
+        return thr
     suggested = round((lo + hi) / 2, 4)
     print(f"  banda: negativos ≤ {lo:.6f} · positivos ≥ {hi:.6f} · margem {hi - lo:.6f}")
     print(f"  → threshold sugerido: {suggested}")
@@ -143,7 +184,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true",
                         help="grava os thresholds sugeridos nos documentos de config")
+    parser.add_argument("--only", nargs="+", choices=["cache", "denylist", "turn"],
+                        help="mede/grava só estes alvos (padrão: todos). Use `--only turn` "
+                             "para recalibrar o classificador sem reescrever o resto.")
+    parser.add_argument("--allow-errors", action="store_true",
+                        help="sem separação perfeita, grava o limiar de menor erro medido "
+                             "(os probes que erram são listados)")
     args = parser.parse_args()
+    wanted = set(args.only or ["cache", "denylist", "turn"])
 
     uri = os.getenv("MONGODB_URI")
     if not uri:
@@ -154,12 +202,15 @@ def main() -> None:
     ai_brain = client["ai_brain"]
 
     cache_thr = calibrate(poc["semantic_cache"], "semantic_cache_vs", "question",
-                          CACHE_PROBES, "Cache semântico (POC.semantic_cache)")
+                          CACHE_PROBES, "Cache semântico (POC.semantic_cache)"
+                          ) if "cache" in wanted else None
     deny_thr = calibrate(poc["guardrail_denylist"], "guardrail_denylist_vs", "phrase",
-                         DENYLIST_PROBES, "Denylist semântico (POC.guardrail_denylist)")
+                         DENYLIST_PROBES, "Denylist semântico (POC.guardrail_denylist)"
+                         ) if "denylist" in wanted else None
 
     turn_thr = calibrate(ai_brain["turn_probes"], "turn_probes_vs", "phrase",
-                         TURN_PROBES, "Classificador de turno (ai_brain.turn_probes)")
+                         TURN_PROBES, "Classificador de turno (ai_brain.turn_probes)",
+                         allow_errors=args.allow_errors) if "turn" in wanted else None
 
     # Threshold POR ÁREA, quando a área tem probes próprios dos dois lados. Uma
     # área só pode ser "mais rígida" se a medição dela sustentar isso: um delta
@@ -167,7 +218,8 @@ def main() -> None:
     # negativo legítimo da própria área ("pode me enviar a nota fiscal?"), ou
     # seja, bloquearia um pedido válido.
     per_area: dict[str, float] = {}
-    areas = {p[2] for p in DENYLIST_PROBES if p[2] != "default"}
+    areas = ({p[2] for p in DENYLIST_PROBES if p[2] != "default"}
+             if "denylist" in wanted else set())
     for area in sorted(areas):
         area_probes = [p for p in DENYLIST_PROBES if p[2] == area]
         if len({p[0] for p in area_probes}) < 2:

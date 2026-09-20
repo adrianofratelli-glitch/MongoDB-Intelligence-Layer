@@ -30,7 +30,7 @@ PROBES_PATH = "phrase"
 
 # Usado só quando ai_brain.turn_classifier_config não existe (seed não rodou).
 # Valor medido com calibrate_thresholds.py — ver o documento de config vivo.
-DEFAULT_THRESHOLD = 0.717
+DEFAULT_THRESHOLD = 0.7162
 
 # Frases de turnos que dependem da memória do usuário (recall, preferência,
 # atualização/esquecimento). Semeadas em ai_brain.turn_probes.
@@ -60,6 +60,25 @@ PERSONAL_PROBES = [
     "esqueça o que eu disse sobre o meu orçamento",
     "anote isso sobre mim para as próximas conversas",
     "guarde essa informação para os próximos atendimentos",
+    "como você me chama mesmo?",
+    "qual apelido eu te passei?",
+    "você tem o meu perfil de compras salvo?",
+    "o que você registrou das minhas preferências?",
+    "lembra qual era o meu teto de preço?",
+    "pode repetir o que eu pedi para você anotar?",
+    "a partir de agora fale comigo por whatsapp",
+    "prefiro ser atendido por telefone",
+    "não me ligue, só mensagem",
+    "me trate pelo primeiro nome",
+    "não quero receber promoções",
+    "me avise quando o preço baixar",
+    "ajuste as recomendações ao meu perfil",
+    "mostre o que você sabe do meu histórico",
+    "apague o que você guardou sobre mim",
+    "me lembra o que a gente combinou antes",
+    "qual valor a gente tinha combinado?",
+    "o que ficou combinado entre nós sobre o meu orçamento?",
+    "o que ficou registrado sobre as minhas preferências?",
 ]
 
 

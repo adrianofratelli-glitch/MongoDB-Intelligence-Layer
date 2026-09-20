@@ -26,6 +26,7 @@ relevant known facts, and flags which old fact each new one replaces (if any).
 """
 
 import json
+import logging
 import math
 import unicodedata
 from datetime import datetime, timezone
@@ -34,6 +35,8 @@ from anthropic import AsyncAnthropic
 from bson import ObjectId
 
 from db import MAX_TIME_MS, aggregate_list, get_client, poc, safe_query
+
+logger = logging.getLogger(__name__)
 
 MEMORY_COLLECTION = "agent_memory"
 MEMORY_INDEX = "agent_memory_vs"       # autoEmbed vector index on `fact`
@@ -90,6 +93,29 @@ def _utcnow() -> datetime:
 
 def _norm(text: str) -> str:
     return " ".join(text.lower().split())
+
+
+# Segunda camada contra envenenamento de memória, DETERMINÍSTICA: mesmo que o
+# extrator (LLM) devolva um "fato" em formato de comando ao assistente, ele não é
+# gravado. Prefixos sobre texto normalizado (sem acento) — " ignor" cobre
+# ignore/ignorar/ignorando. Fatos legítimos ("gosta de ofertas de desconto")
+# não casam: só o contorno de política, a ordem ao assistente e o acesso a
+# terceiros.
+_INSTRUCTION_MARKERS = (
+    " ignor", " desconsider", " instrucoes anteriores", " prompt", " burl",
+    " contorn", " bypass", " revel", " aprov", " conceder ", " conceda",
+    " outros clientes", " outro cliente", " de terceiros",
+    " sem verificar", " sem validar", " sem conferir", " sem autorizacao",
+    " assistente deve", " agente deve", " voce deve", " o sistema deve",
+    " desconto sempre", " sempre desconto", " sempre ter desconto",
+    " as politicas", " regras da loja", " permissoes",
+)
+
+
+def looks_like_instruction(fact: str) -> bool:
+    """Fato em formato de comando/contorno de política — nunca vira memória."""
+    folded = _fold(fact)
+    return any(marker in folded for marker in _INSTRUCTION_MARKERS)
 
 
 def _clean_budget(value) -> float | None:
@@ -440,6 +466,9 @@ async def extract_and_store(user_key: str, user_message: str, session_id: str,
     for c in candidates:
         fact = (c.get("fact") or "").strip()[:MAX_FACT_CHARS]
         if not fact or fact.lower() in known_texts:
+            continue
+        if looks_like_instruction(fact):
+            logger.warning("fato em formato de instrução descartado (user_key=%s)", user_key)
             continue
         # Exact duplicates are checked against the complete memory, not only the
         # retrieval candidates, so semantic recall misses cannot create repeats.
