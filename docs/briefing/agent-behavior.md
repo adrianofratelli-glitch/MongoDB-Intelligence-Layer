@@ -122,7 +122,7 @@ O gate de frases só pega o óbvio; paráfrases ("como devo ser tratado por voc�
 
 ### Orçamento aplicado pelo servidor (`memory.active_budget` + `agent._read_denial`)
 
-O extrator devolve `max_price_brl` estruturado no fato de limite de preço; um novo limite supersede o anterior automaticamente (só um ativo). Na busca de catálogo o servidor reescreve o pipeline com `$match: {preco: {$lte: orçamento}}` — o modelo não consegue ignorá-lo nem substituí-lo. Como `preco` não é campo `filter` do índice `produtos_vector` (somente leitura), a busca lê 200 candidatos (`numCandidates` 500) antes do corte e limita a 3; custa ~1,3 s a mais, só para quem tem orçamento. O ideal, se o índice do catálogo puder mudar, é `preco` como campo `filter` (pré-filtro nativo).
+O extrator devolve `max_price_brl` estruturado no fato de limite de preço; um novo limite supersede o anterior automaticamente (só um ativo). Na busca de catálogo o servidor reescreve o pipeline e injeta o teto como **pré-filtro nativo** do `$vectorSearch` (`filter: {preco: {$lte: orçamento}}` — `preco` já é campo `filter` do índice `produtos_vector`): o ANN só percorre vetores dentro do orçamento, devolve sempre 3 itens e custa o mesmo que a busca sem filtro. O modelo não consegue ignorar nem substituir o filtro. Quem julga se os itens correspondem ao pedido (ex.: sem notebook barato, o vizinho mais próximo dentro do teto pode ser um livro) é o modelo, instruído no prompt a tratar isso como "sem opção no orçamento".
 
 ### Extração (`memory.extract_and_store`, `memory.py:323-462`)
 

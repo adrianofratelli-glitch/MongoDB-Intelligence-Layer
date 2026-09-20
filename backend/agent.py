@@ -279,14 +279,6 @@ def _graph_order_id(tool_input: dict) -> str | None:
     return candidate if ORDER_ID_RE.fullmatch(candidate) else None
 
 
-CATALOG_BUDGET_WIDEN = 200       # candidatos lidos antes do corte de preço (3 finais)
-CATALOG_BUDGET_CANDIDATES = 500  # numCandidates da busca ampliada (>= WIDEN)
-# Por que tão largo: o índice do catálogo não tem `preco` como campo de filtro
-# (somente leitura), e o ranking semântico agrupa itens caros ("fone de ouvido" →
-# 50 primeiros acima de R$ 1.245). Janela de 200 acha opções baratas; ~1,3 s a
-# mais por busca, só para quem tem orçamento. O ideal é `preco` filter no índice.
-
-
 def _valid_budget(budget) -> float | None:
     """Orçamento só vale se for número finito e positivo (nunca string/NaN)."""
     if isinstance(budget, bool) or not isinstance(budget, (int, float)):
@@ -388,20 +380,16 @@ def _read_denial(tool_name: str, target: str, tool_input: dict,
                 {"$project": {"nome": 1, "preco": 1, "_id": 0}},
             ]
             return None
-        # Com orçamento: o índice do catálogo não tem `preco` como campo de filtro
-        # (dataset/índice são somente leitura), então lê-se mais candidatos, corta
-        # por preço no servidor e só então limita — senão o corte poderia zerar o
-        # resultado mesmo havendo produtos baratos logo abaixo no ranking.
-        widened = max(limit, CATALOG_BUDGET_WIDEN)
+        # Com orçamento: `preco` é campo `filter` do índice produtos_vector, então o
+        # teto entra como PRÉ-FILTRO nativo — o $vectorSearch só percorre vetores
+        # dentro do orçamento e devolve sempre `limit` itens, sem janela larga nem
+        # $match depois do ranking. Filtro vindo do modelo nunca é copiado.
         tool_input["pipeline"] = [
             {"$vectorSearch": {
                 "index": "produtos_vector", "path": "descricao",
-                "query": query.strip(),
-                "numCandidates": max(candidates, widened, CATALOG_BUDGET_CANDIDATES),
-                "limit": widened,
+                "query": query.strip(), "numCandidates": candidates, "limit": limit,
+                "filter": {"preco": {"$lte": budget}},
             }},
-            {"$match": {"preco": {"$lte": budget}}},
-            {"$limit": limit},
             {"$project": {"nome": 1, "preco": 1, "_id": 0}},
         ]
         return None
@@ -1486,9 +1474,11 @@ async def run_agent(
     system_static = SYSTEM + persona_block
     budget_block = (
         f"\n\nOrçamento do cliente: R$ {budget_brl:,.2f}. A busca de catálogo já "
-        "devolve somente itens dentro desse teto (filtro aplicado pelo sistema). Se "
-        "voltar vazia, diga que não há opção dentro do orçamento — nunca que o "
-        "produto está indisponível — e ofereça alternativas ou categorias próximas."
+        "devolve somente itens dentro desse teto (filtro aplicado pelo sistema). Os "
+        "itens são os mais próximos do pedido DENTRO do orçamento, então confira se "
+        "de fato correspondem ao que o cliente pediu: se voltar vazia ou só trouxer "
+        "itens de outra categoria, diga que não há opção dentro do orçamento — "
+        "nunca que o produto está indisponível — e ofereça alternativas próximas."
         if budget_brl else ""
     )
     system_dynamic = (_memory_note(conversation_id) + memory.format_for_prompt(ltm)

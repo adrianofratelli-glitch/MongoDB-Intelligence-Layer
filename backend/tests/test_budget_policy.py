@@ -32,32 +32,38 @@ class BudgetPolicyTests(unittest.TestCase):
         self.assertEqual([next(iter(s)) for s in pipeline], ["$vectorSearch", "$project"])
         self.assertEqual(pipeline[0]["$vectorSearch"]["limit"], 3)
 
-    def test_budget_adds_server_side_price_match_and_widens_candidates(self):
+    def test_budget_becomes_native_prefilter_on_the_vector_index(self):
         denial, pipeline = _rewrite(800)
         self.assertIsNone(denial)
-        self.assertEqual([next(iter(s)) for s in pipeline],
-                         ["$vectorSearch", "$match", "$limit", "$project"])
-        self.assertEqual(pipeline[1], {"$match": {"preco": {"$lte": 800.0}}})
-        self.assertEqual(pipeline[2], {"$limit": 3})
-        # busca larga o bastante para sobrar itens depois do corte de preço
-        self.assertGreater(pipeline[0]["$vectorSearch"]["limit"], 3)
-        self.assertGreaterEqual(pipeline[0]["$vectorSearch"]["numCandidates"],
-                                pipeline[0]["$vectorSearch"]["limit"])
-        self.assertEqual(pipeline[3], {"$project": {"nome": 1, "preco": 1, "_id": 0}})
+        # pré-filtro NATIVO (preco é campo filter do índice): sem $match, sem janela larga
+        self.assertEqual([next(iter(s)) for s in pipeline], ["$vectorSearch", "$project"])
+        vector = pipeline[0]["$vectorSearch"]
+        self.assertEqual(vector["filter"], {"preco": {"$lte": 800.0}})
+        self.assertEqual(vector["limit"], 3)
+        self.assertEqual(pipeline[1], {"$project": {"nome": 1, "preco": 1, "_id": 0}})
 
-    def test_model_cannot_override_budget_with_its_own_match(self):
+    def test_model_cannot_override_budget_with_its_own_filter(self):
         tool_input = _catalog_input()
+        vector = tool_input["pipeline"][0]["$vectorSearch"]
+        vector["filter"] = {"preco": {"$lte": 999999}}
         tool_input["pipeline"].append({"$match": {"preco": {"$lte": 999999}}})
         agent._read_denial("aggregate", "POC.produtos_vector", tool_input,
                            "conv", "user", budget_brl=500)
-        matches = [s for s in tool_input["pipeline"] if "$match" in s]
-        self.assertEqual(matches, [{"$match": {"preco": {"$lte": 500.0}}}])
+        pipeline = tool_input["pipeline"]
+        self.assertEqual(pipeline[0]["$vectorSearch"]["filter"], {"preco": {"$lte": 500.0}})
+        self.assertNotIn("$match", [next(iter(s)) for s in pipeline])
+
+    def test_model_supplied_filter_is_dropped_without_budget(self):
+        tool_input = _catalog_input()
+        tool_input["pipeline"][0]["$vectorSearch"]["filter"] = {"categoria": "x"}
+        agent._read_denial("aggregate", "POC.produtos_vector", tool_input, "conv", "user")
+        self.assertNotIn("filter", tool_input["pipeline"][0]["$vectorSearch"])
 
     def test_invalid_budget_values_are_ignored(self):
         for bad in (0, -10, float("nan"), float("inf"), "800"):
             with self.subTest(bad=bad):
                 _, pipeline = _rewrite(bad)
-                self.assertNotIn("$match", [next(iter(s)) for s in pipeline])
+                self.assertNotIn("filter", pipeline[0]["$vectorSearch"])
 
 
 if __name__ == "__main__":
