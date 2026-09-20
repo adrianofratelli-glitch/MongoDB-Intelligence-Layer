@@ -703,7 +703,7 @@ export default function Agent({ state, setState }) {
         <div className="metric-bar">
           <div className="metric"><div className="metric-val">{metrics.reads}</div><div className="metric-label">reads</div></div>
           <div className="metric"><div className="metric-val">{metrics.writes}</div><div className="metric-label">writes</div></div>
-          <div className="metric"><div className="metric-val">{metrics.tools}</div><div className="metric-label">tools usadas</div></div>
+          <div className="metric"><div className="metric-val">{metrics.tools}</div><div className="metric-label">operações</div></div>
           <div className="metric"><div className="metric-val">{metrics.latency}<span className="metric-unit">ms</span></div><div className="metric-label">latência</div></div>
         </div>
       </div>
