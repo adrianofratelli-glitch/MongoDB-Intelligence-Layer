@@ -79,8 +79,8 @@ export const api = {
   // Tab 2
   getModelConfig: () => request('/api/model-config'),
   swapModels: () => request('/api/model-config/swap', { method: 'POST' }),
-  quickChat: (question) =>
-    request('/api/chat/quick', { method: 'POST', body: JSON.stringify({ question }) }),
+  quickChat: (question, history = []) =>
+    request('/api/chat/quick', { method: 'POST', body: JSON.stringify({ question, history }) }),
 
   // Tab 3 — Agent (autonomous loop via MongoDB MCP Server)
   users: () => request('/api/users'),

@@ -190,6 +190,13 @@ def _mask(text: str, patterns: list[dict]) -> tuple[str, list[str]]:
     return masked, fired
 
 
+async def mask_pii(text: str, area: str = "default") -> str:
+    """Só o mascaramento de PII da política da área — sem denylist nem auditoria.
+    Usado em histórico de conversa já validado turno a turno por `check_input`."""
+    policy = await get_policy(area)
+    return _mask(text, policy.get("pii_patterns", []))[0]
+
+
 async def check_input(text: str, user_key: str, session_id: str,
                       area: str = "default") -> dict:
     """Guardrail on the incoming message. Blocks and logs when a rule fires.

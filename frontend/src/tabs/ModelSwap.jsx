@@ -78,12 +78,22 @@ export default function ModelSwap({ state, setState }) {
   const ask = async () => {
     if (!question.trim() || busy) return;
     const q = question.trim();
+    // histórico da sessão do mini-chat; turnos bloqueados pelo guardrail ficam de fora
+    const history = [];
+    state.messages.forEach((m, i) => {
+      if (m.role === 'assistant' && m.meta?.route === 'blocked') {
+        history.pop();
+        return;
+      }
+      if (i === state.messages.length - 1 && m.role === 'user') return;
+      history.push({ role: m.role, text: m.text });
+    });
     setBusy(true);
     setError(null);
     setState((s) => ({ ...s, messages: [...s.messages, { role: 'user', text: q }] }));
     setQuestion('');
     try {
-      const r = await api.quickChat(q);
+      const r = await api.quickChat(q, history.slice(-10));
       setState((s) => ({
         ...s,
         messages: [...s.messages, { role: 'assistant', text: r.text, meta: r }],

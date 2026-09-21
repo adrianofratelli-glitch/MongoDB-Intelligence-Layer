@@ -144,6 +144,24 @@ def should_extract(user_message: str) -> bool:
     return any(f" {p}" in folded for p in _DURABLE_PHRASES)
 
 
+# Perguntas sobre a própria conversa ("resuma o que perguntei") dependem do
+# histórico da sessão: a resposta certa muda a cada sessão, então nunca podem
+# ler nem gravar o cache compartilhado.
+_CONVERSATION_PHRASES = (
+    "perguntas que eu fiz", "pergunta que eu fiz", "o que eu perguntei",
+    "que eu perguntei", "nessa sessao", "nesta sessao", "nessa conversa",
+    "nesta conversa", "ate agora", "resum", "que eu disse", "que eu falei",
+    "voce disse", "acabei de", "mencionei", "mensagem anterior",
+    "pergunta anterior", "perguntas anteriores",
+)
+
+
+def references_conversation(user_message: str) -> bool:
+    """Whether the message refers to the conversation itself (history-dependent)."""
+    folded = _fold(user_message)
+    return any(f" {p}" in folded for p in _CONVERSATION_PHRASES)
+
+
 def _extractor_usage(usage) -> dict:
     return {
         "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),

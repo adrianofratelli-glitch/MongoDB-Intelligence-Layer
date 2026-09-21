@@ -23,6 +23,7 @@ import time
 from collections import defaultdict, deque
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 from uuid import uuid4
 
 from bson import ObjectId
@@ -40,6 +41,7 @@ import guidance
 import memory
 import observability
 import profiles
+import turn_classifier
 from agent import (
     DEFAULT_USER_KEY,
     AREA_SCENARIOS,
@@ -500,9 +502,47 @@ async def swap_models(request: Request, area: str = "default"):
     return clean(await get_active_config(area))
 
 
+class QuickChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str = Field(max_length=4_000)
+
+
+QUICK_CHAT_HISTORY_TURNS = 10
+QUICK_CHAT_HISTORY_CHARS = 6_000
+
+
 class QuickChatBody(BaseModel):
     question: str = Field(min_length=1, max_length=4_000)
+    # Turnos anteriores da sessão do mini-chat (o estado vive no navegador).
+    history: list[QuickChatTurn] = Field(default_factory=list, max_length=40)
     user_key: str | None = Field(default=None, max_length=128)
+
+
+async def _quick_chat_history(turns: list[QuickChatTurn], area: str) -> list[dict]:
+    """Histórico limitado e com PII mascarada, alternando user/assistant (a API
+    exige começar em user). Teto de turnos e de caracteres, como no agente."""
+    picked, used = [], 0
+    for t in reversed(turns[-QUICK_CHAT_HISTORY_TURNS:]):
+        text = t.text.strip()
+        if not text:
+            continue
+        used += len(text)
+        if used > QUICK_CHAT_HISTORY_CHARS:
+            break
+        picked.append({"role": t.role,
+                       "content": await guardrails.mask_pii(text, area) if t.role == "user" else text})
+    picked.reverse()
+    while picked and picked[0]["role"] != "user":
+        picked.pop(0)
+    merged: list[dict] = []
+    for m in picked:
+        if merged and merged[-1]["role"] == m["role"]:
+            merged[-1]["content"] += "\n" + m["content"]
+        else:
+            merged.append(dict(m))
+    if merged and merged[-1]["role"] == "user":
+        merged.pop()  # user órfão (sem resposta): a pergunta atual segue em user
+    return merged
 
 
 @app.post("/api/chat/quick")
@@ -541,7 +581,12 @@ async def quick_chat(body: QuickChatBody, request: Request):
         }
     # Cache semântico também aqui: mesma pergunta (semanticamente) já respondida
     # → serve do MongoDB sem tocar o LLM. Área do usuário escopa a visibilidade.
-    cached = await cache.lookup(masked, area=area)
+    # Pergunta pessoal ou sobre a própria conversa depende de quem/quando pergunta:
+    # não lê nem grava o cache compartilhado (mesmo gate do agente; falha fechado).
+    bypass_cache = memory.should_extract(masked) or memory.references_conversation(masked)
+    if not bypass_cache:
+        bypass_cache = (await turn_classifier.classify(masked))["personal"]
+    cached = {"hit": False, "bypass": True} if bypass_cache else await cache.lookup(masked, area=area)
     if cached.get("hit"):
         observability.metrics.bump("cache_hits")
         return {
@@ -553,9 +598,10 @@ async def quick_chat(body: QuickChatBody, request: Request):
             "output_tokens": 0,
             "cache": cached,
         }
+    history = await _quick_chat_history(body.history, area)
     result = await call_with_fallback(
         system="Você é um assistente de e-commerce. Responda em português, em poucas frases.",
-        messages=[{"role": "user", "content": masked}],
+        messages=history + [{"role": "user", "content": masked}],
         area=area,
     )
     # PII na saída mascarada aqui também — mesma regra do agente
@@ -563,11 +609,12 @@ async def quick_chat(body: QuickChatBody, request: Request):
     result["text"] = guard_out["text"]
     # Sem memória/tools neste endpoint → resposta é genérica por construção,
     # segura para o cache compartilhado da área.
-    try:
-        await cache.store(masked, result["text"], result.get("model", "?"),
-                          scope="quick-chat", area=area)
-    except Exception:  # noqa: BLE001 — falha de cache nunca degrada a resposta
-        logger.exception("cache store falhou no quick-chat")
+    if not bypass_cache:
+        try:
+            await cache.store(masked, result["text"], result.get("model", "?"),
+                              scope="quick-chat", area=area)
+        except Exception:  # noqa: BLE001 — falha de cache nunca degrada a resposta
+            logger.exception("cache store falhou no quick-chat")
     result["cache"] = cached
     return result
 

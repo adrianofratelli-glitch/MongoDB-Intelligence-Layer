@@ -311,6 +311,34 @@ class RuntimeSecurityTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.main.QuickChatBody(question="")
 
+    def test_conversation_recall_bypasses_cache_gate(self):
+        import memory
+
+        for q in ("quais foram as perguntas que eu fiz nessa sessão?",
+                  "resuma o que conversamos até agora",
+                  "o que eu perguntei antes?"):
+            self.assertTrue(memory.references_conversation(q), q)
+        for q in ("quem é o presidente dos EUA?", "qual a capital da Austrália?"):
+            self.assertFalse(memory.references_conversation(q), q)
+
+    def test_quick_chat_history_alternates_and_starts_with_user(self):
+        import asyncio
+
+        turns = [self.main.QuickChatTurn(role="assistant", text="orfa"),
+                 self.main.QuickChatTurn(role="user", text="oi"),
+                 self.main.QuickChatTurn(role="assistant", text="olá"),
+                 self.main.QuickChatTurn(role="user", text="sem resposta")]
+
+        async def fake_mask(text, area="default"):
+            return text
+
+        self.main.guardrails.mask_pii, orig = fake_mask, self.main.guardrails.mask_pii
+        try:
+            out = asyncio.run(self.main._quick_chat_history(turns, "default"))
+        finally:
+            self.main.guardrails.mask_pii = orig
+        self.assertEqual([m["role"] for m in out], ["user", "assistant"])
+
 
 if __name__ == "__main__":
     unittest.main()
