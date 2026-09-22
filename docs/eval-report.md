@@ -137,19 +137,24 @@ Leitura honesta desses números:
    **Não corrigi**: mexer no limiar é recalibrar (`calibrate_thresholds.py` contra probes
    rotulados), e mexer na estratégia (ex.: casar também por trecho, não só pela frase inteira) é
    decisão de arquitetura do guardrail. Fica para a sua decisão.
-2. **Duas entradas de cache com dado de pedido apareceram no banco de teste** — `"Qual é o status
-   do pedido PED-2001?"` (área financeiro) e `"O pedido PED-3001 está em qual etapa da entrega?"`
-   (área logística), com a resposta completa do pedido. Foram gravadas nas rodadas em que o eval
-   reusava o mesmo `conversation_id` entre execuções.
-   **Mecanismo provável**: com a resposta anterior no histórico curto, o turno responde SEM chamar
-   ferramenta; `used_business_tools` (o portão de higiene) olha só `metrics.tools_used` DESTE
-   turno, então a resposta — que carrega dado de pedido herdado do turno anterior — passa pelo
-   portão e vai para o cache compartilhado da área.
-   **Não reproduzi sob demanda**: repetindo o mesmo turno na mesma conversa, o modelo voltou a
-   chamar a ferramenta e `cache_stored` ficou `False` nas duas vezes. Na rodada final, com ids
-   novos por execução, `cache_leaks` deu **0** e nenhuma entrada de pedido foi gravada. Os
-   documentos antigos foram removidos do banco de teste; o banco da DEMO nunca teve equivalente.
-   **Não corrigi**: o reforço óbvio e barato — nunca gravar no cache compartilhado uma resposta
-   que contenha um identificador de pedido (`ORDER_ID_RE`), independentemente de ter havido
-   chamada de ferramenta neste turno — é pequeno, mas endurece um invariante documentado no
-   CLAUDE.md sobre uma causa que não reproduzi. **Peço sua decisão antes de aplicar.**
+2. **Resposta com os pedidos DO CLIENTE ia para o cache compartilhado da área — CORRIGIDO.**
+   Primeiro sintoma: duas entradas de cache com dado de pedido no banco de teste
+   (`"Qual é o status do pedido PED-2001?"`, área financeiro; `"O pedido PED-3001 está em qual
+   etapa da entrega?"`, área logística).
+   **Reproduzido depois, de forma determinística e sem nenhum caso do dataset**: a pergunta
+   genérica *"Vocês fazem entrega aos domingos?"* (`cliente-demo`, **zero** chamadas de
+   ferramenta, sem fato de memória, classificador dizendo `personal: false`) recebeu a resposta
+   *"…Consultar o status dos seus pedidos…"* citando **PED-1001 e PED-1002** — os pedidos daquela
+   identidade, que entram no prompt pelas orientações de escopo/negação
+   (`guidance.scope_reply`/`empty_order_hint` listam os pedidos do cliente).
+   O portão de higiene olhava só `metrics.tools_used` DESTE turno: turno genérico, nenhuma
+   ferramenta → **cacheável**. A entrada iria para o cache da área e seria servida a OUTRO cliente
+   da mesma área.
+   **Correção** (`agent.mentions_order`, usada no cálculo de `personalized`): um identificador
+   `PED-…` na pergunta **ou na resposta** marca o turno como transacional e barra a gravação no
+   cache compartilhado, com ou sem chamada de ferramenta. Regressão em
+   `tests/test_policies.py:CacheOrderHygieneTests`; verificado ao vivo no banco de teste
+   (transacional `cache_stored=False`, genérico sem id segue cacheável).
+   **O que NÃO foi feito**: tirar a lista de pedidos das orientações de escopo. Ela é útil no
+   turno (o cliente vê o que pode tratar) e não é PII de terceiro — o problema era só o reuso via
+   cache, que agora está fechado.

@@ -265,6 +265,11 @@ def _is_empty_order_read(tool_name: str, target: str, text: str) -> bool:
     return parsed in ([], {}, None)
 
 
+def mentions_order(text: str) -> bool:
+    """True quando o texto cita um pedido (`PED-…`) — logo, é dado transacional."""
+    return bool(ORDER_ID_RE.search(text or ""))
+
+
 def _specific_order_id(tool_input: dict) -> str | None:
     """Return a safe scalar order id; reject operators and broad predicates."""
     filt = tool_input.get("filter")
@@ -1674,7 +1679,15 @@ async def run_agent(
         # the whole area with a false "sua preferência foi salva" promise.
         personalized = (bool(new_facts) or bool(superseded)
                         or bool(ltm.get("facts")) or mem_task is not None
-                        or personal_turn)
+                        or personal_turn
+                        # Um identificador de pedido na pergunta OU na resposta
+                        # torna o turno transacional, mesmo que ESTE turno não
+                        # tenha chamado ferramenta nenhuma: a resposta pode ter
+                        # herdado o dado do pedido do histórico curto da sessão, e
+                        # `used_business_tools` só enxerga o turno atual. Sem isto,
+                        # o estado de um pedido de um cliente pode ser reservido a
+                        # outro cliente da mesma área pelo cache compartilhado.
+                        or mentions_order(user_msg) or mentions_order(final_answer))
         if not personalized:
             # Última barreira: mesmo sem sinal de frase nem fatos, uma pergunta
             # semanticamente pessoal não pode ir para o cache compartilhado.

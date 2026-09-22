@@ -342,3 +342,26 @@ class RuntimeSecurityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CacheOrderHygieneTests(unittest.TestCase):
+    """Resposta transacional nunca vai para o cache compartilhado.
+
+    O portão antigo olhava só `metrics.tools_used` DESTE turno. Um turno que
+    responde pelo histórico curto ("e o meu PED-2001?") não chama ferramenta e
+    passava batido, levando o estado do pedido de um cliente para o cache da área
+    — de onde outro cliente da mesma área poderia recebê-lo. Ver
+    docs/eval-report.md, achado 2.
+    """
+
+    def test_order_id_in_question_marks_the_turn_as_transactional(self):
+        self.assertTrue(agent.mentions_order("qual o status do PED-2001?"))
+
+    def test_order_id_in_answer_marks_the_turn_as_transactional(self):
+        self.assertTrue(agent.mentions_order(
+            "O seu pedido **PED-3001** está em trânsito."))
+
+    def test_generic_question_and_answer_stay_cacheable(self):
+        self.assertFalse(agent.mentions_order("qual é o prazo de troca?"))
+        self.assertFalse(agent.mentions_order(
+            "A troca pode ser solicitada em até 30 dias após o recebimento."))
