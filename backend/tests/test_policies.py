@@ -365,3 +365,25 @@ class CacheOrderHygieneTests(unittest.TestCase):
         self.assertFalse(agent.mentions_order("qual é o prazo de troca?"))
         self.assertFalse(agent.mentions_order(
             "A troca pode ser solicitada em até 30 dias após o recebimento."))
+
+    def test_probing_another_customers_order_is_never_cached(self):
+        """Sondagem de pedido de TERCEIRO também é turno transacional.
+
+        A leitura já devolve vazio (o filtro é reescrito com owner_user_key), mas a
+        resposta diz quais pedidos são DESTA identidade — cachear isso serviria a
+        lista de pedidos de um cliente a outro da mesma área. Medido ao vivo:
+        marina.fin perguntando por PED-1001 (do cliente-demo) recebe
+        "não encontrei no seu histórico" + PED-2001/PED-2002, e cache_stored=False.
+        """
+        answer = ("Não encontrei o pedido PED-1001 no seu histórico. "
+                  "Os seus pedidos são PED-2001 e PED-2002.")
+        self.assertTrue(agent.transactional_turn(
+            "Vocês têm o pedido PED-1001?", answer, used_business_tools=False))
+
+    def test_turn_that_called_a_business_tool_is_never_cached(self):
+        self.assertTrue(agent.transactional_turn(
+            "qual o prazo de troca?", "O prazo é de 30 dias.", used_business_tools=True))
+
+    def test_generic_turn_without_order_stays_cacheable(self):
+        self.assertFalse(agent.transactional_turn(
+            "qual o prazo de troca?", "O prazo é de 30 dias.", used_business_tools=False))

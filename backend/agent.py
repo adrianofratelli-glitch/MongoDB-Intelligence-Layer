@@ -270,6 +270,23 @@ def mentions_order(text: str) -> bool:
     return bool(ORDER_ID_RE.search(text or ""))
 
 
+def transactional_turn(user_msg: str, final_answer: str, used_business_tools: bool) -> bool:
+    """Turno transacional = nunca pode ir para o cache COMPARTILHADO da área.
+
+    Três formas de sê-lo, e as três importam:
+      1. chamou ferramenta de negócio neste turno;
+      2. a PERGUNTA cita um pedido (inclusive sondagem de pedido de terceiro:
+         a leitura devolve vazio pelo filtro de dono, mas a resposta diz quais
+         pedidos são DESTA identidade);
+      3. a RESPOSTA cita um pedido sem que a pergunta citasse — caso medido:
+         pergunta genérica, zero ferramentas, e a resposta traz a lista de
+         pedidos do cliente vinda das orientações de escopo/negação.
+    """
+    return (used_business_tools
+            or mentions_order(user_msg)
+            or mentions_order(final_answer))
+
+
 def _specific_order_id(tool_input: dict) -> str | None:
     """Return a safe scalar order id; reject operators and broad predicates."""
     filt = tool_input.get("filter")
@@ -1687,7 +1704,7 @@ async def run_agent(
                         # `used_business_tools` só enxerga o turno atual. Sem isto,
                         # o estado de um pedido de um cliente pode ser reservido a
                         # outro cliente da mesma área pelo cache compartilhado.
-                        or mentions_order(user_msg) or mentions_order(final_answer))
+                        or transactional_turn(user_msg, final_answer, used_business_tools))
         if not personalized:
             # Última barreira: mesmo sem sinal de frase nem fatos, uma pergunta
             # semanticamente pessoal não pode ir para o cache compartilhado.
