@@ -97,6 +97,19 @@ Docker: `docker build -t intelligence-layer-poc . && docker run --env-file .env 
 Defina `ENVIRONMENT=production`, `AUTH_REQUIRED=1` e `DEMO_TOKEN_ISSUANCE_ENABLED=0`. A inicialização rejeita segredos de JWT ou admin fracos/padrão e CORS com curinga; o `/metrics` exige autorização de admin. Nomes de modelo e caminhos de update passam por allowlist para evitar injeção de campos com ponto ou `$`. A imagem roda como UID 10001 atrás do nginx com cabeçalhos de segurança.
 
 
+## Limitação conhecida do guardrail semântico
+
+A denylist compara o embedding da mensagem inteira com o das frases proibidas. Uma frase proibida
+somada a uma **segunda intenção de outro assunto** cai de 0,9284 para **0,6799** de similaridade e
+deixa de bloquear — abaixo, inclusive, de perguntas legítimas do domínio (0,7330–0,7680), então
+nenhum ajuste de limiar corrige isso sem transformar cliente legítimo em bloqueio. É limite do
+padrão "embedding de frase única", não calibração ruim; resolver exige decomposição de
+sub-intenção ou uma camada de classificação adicional.
+
+Na prática o turno não vaza dado: a reescrita de política nega a leitura ampla no servidor e o
+cliente recebe orientação. A denylist é uma camada, não a única. Medições e causa raiz em
+[CLAUDE.md](CLAUDE.md) e [docs/eval-report.md](docs/eval-report.md).
+
 ## Gateway e custos da POV
 
 Integração Grove para Claude e GPT, custos estimados por chamada e resumo compacto de execução: [guia interno e validação](docs/internal/gateway-economics.md). Os modelos principais existentes foram preservados.

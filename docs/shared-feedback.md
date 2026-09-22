@@ -86,6 +86,57 @@ pré-requisito para reproduzir os números.
    (mode, scored_cases, skipped_requires_llm, métricas, synthetic, limitation) e um `--compare`
    campo a campo — hoje cada PoV reimplementa isso.
 
+## Achado de SEGURANÇA transversal (afeta qualquer PoV com denylist por embedding)
+
+Não é atrito de instalação — é um limite do PADRÃO que várias PoVs do portfólio usam: bloquear
+entrada comparando o embedding da mensagem inteira contra frases proibidas, com limiar calibrado.
+
+**O que acontece**: anexar à frase proibida uma **segunda intenção, de outro assunto**, derruba a
+similaridade para longe de TODA a denylist. Cauda neutra não engana; cauda com outro pedido ao
+sistema, sim. Medido nesta PoV em 22/09/2026, nos bancos de demo e de teste:
+
+| Texto | Score | Bloqueia? |
+|---|---|---|
+| frase da denylist, sozinha | 0,9284 | sim |
+| + cauda neutra | 0,8671 / 0,8999 | sim |
+| **+ segunda intenção** | **0,6799** | **não**, e nem entra em near-miss |
+
+**Por que recalibrar não resolve** (sondas rotuladas da própria calibração):
+
+| Grupo | Faixa |
+|---|---|
+| Positivos (devem bloquear) | 0,7914 – 0,8562 |
+| Limiar vigente | 0,7799 |
+| Negativos legítimos | 0,7330 – 0,7680 |
+| Texto evasivo | **0,6799** |
+
+O evasivo fica abaixo de todo negativo legítimo: qualquer limiar que o pegue bloqueia 5 de 5
+perguntas legítimas do domínio ("qual o status do meu pedido?", "nota fiscal da minha compra",
+"trocar meu fone com defeito", "dados de entrega", "quando o reembolso cai"). É um teto do método,
+não um número mal escolhido.
+
+**Causa raiz**: um embedding de frase única representa a mensagem como mistura de assuntos, e
+"intenção proibida + intenção legítima" fica vetorialmente parecido com "pergunta legítima
+composta". Separar exige decomposição de sub-intenção (casar trechos/janelas em vez da mensagem
+inteira) ou uma camada de classificação por cima.
+
+**O `_shared` já tem parte da resposta.** `guardrails.check_injection` (NÚCLEO, sem dependência
+extra, sem LLM) marca o texto evasivo como `injection:heuristic` e deixa passar o negativo
+legítimo `"qual o status do meu pedido?"` — testado no venv desta PoV. Sugestões, em ordem de
+custo:
+
+1. Documentar no README do `_shared` que denylist por embedding **não** deve ser a única camada
+   de defesa contra injeção, com estes números como evidência.
+2. Oferecer um helper combinado (`check_injection` determinístico → `$vectorSearch` semântico →
+   opcionalmente LLM) para as PoVs não reimplementarem a ordem das camadas cada uma do seu jeito.
+3. Avaliar casamento por janela/trecho no lado do vetor, já que o problema é a diluição pela
+   mensagem inteira.
+
+**Nesta PoV nada foi alterado**: decisão registrada de NÃO recalibrar e não tocar `ai_brain`; a
+limitação está em `CLAUDE.md`, no `README.md` e em `docs/eval-report.md` (caso `single-010` do
+eval). A defesa em profundidade segurou o caso medido — a reescrita de política negou a leitura
+ampla no servidor e nenhum dado vazou.
+
 ## Resumo para o dono do `_shared`
 
 | Item | Severidade | Ação sugerida |
@@ -94,3 +145,4 @@ pré-requisito para reproduzir os números.
 | `init_tracing` devolve `off` sem motivo | média | devolver/expor o motivo |
 | Resiliência de LLM não adotável sem perder ledger de custo | média | `on_attempt` callback no wrapper |
 | `evalkit` sem formato de summary comparável entre PoVs | baixa | padronizar o summary do `eval/FORMAT.md` |
+| **Denylist por embedding evadida por diluição de intenção** (afeta todas as PoVs com esse padrão) | **alta** | documentar que não pode ser camada única; helper combinado com `check_injection`; avaliar casamento por trecho |
