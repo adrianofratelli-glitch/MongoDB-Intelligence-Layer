@@ -23,15 +23,18 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 import cache
-import guardrails
+import chaos
+import observability
+import policy_guardrails as guardrails
+import resilience
 import memory
 import turn_classifier
 import profiles
-from db import MAX_TIME_MS, poc
+from db import DB_CATALOG, DB_MAIN, MAX_TIME_MS, poc
 from graph import build_order_chain_pipeline, summarize_order_chain
 from guidance import denial_hint, empty_order_hint, is_obviously_out_of_scope, scope_reply
 from llm import get_active_config
-import tracing
+import langfuse_tracing as tracing
 
 
 def estimate_tokens(text: str) -> int:
@@ -72,6 +75,10 @@ anthropic_client = GatewayClient(role="support_agent")
 
 LLM_RETRIES = 2            # novas tentativas no MESMO modelo antes do fallback
 LLM_BACKOFF_SECONDS = 1.0  # backoff exponencial: 1s, 2s
+# A bateria de caos exercita o MESMO caminho de retry, mas não pode gastar 3s de
+# relógio por cenário só esperando o backoff real. Nunca muda o caminho da demo:
+# fora de CHAOS=1 o fator é 1.
+CHAOS_BACKOFF_SCALE = float(os.getenv("CHAOS_BACKOFF_SCALE", "1"))
 # Deadline do turno inteiro (loop + tools): MCP travado não segura a request
 # para sempre. Budget de tokens: MAX_ITERS limita rounds, isto limita CUSTO.
 AGENT_TURN_TIMEOUT_SECONDS = float(os.getenv("AGENT_TURN_TIMEOUT_SECONDS", "120"))
@@ -98,7 +105,20 @@ async def _create_with_retry(client, *, model: str, fallback_model: str | None =
     last_exc: Exception | None = None
     for attempt in range(LLM_RETRIES + 1):
         try:
-            return await client.messages.create(model=model, **kwargs)
+            with observability.span("llm.create", **{"llm.model": model,
+                                                     "llm.attempt": attempt}):
+                if chaos.enabled():
+                    # Falha do provedor ANTES do primeiro token: o retry tem que
+                    # ver o mesmo erro que o SDK entregaria.
+                    await chaos.hook("llm", name=model,
+                                     phase="before_first_token" if attempt == 0 else "retry")
+                return await client.messages.create(model=model, **kwargs)
+        except chaos.ChaosProviderError as exc:
+            last_exc = exc
+            if attempt < LLM_RETRIES:
+                await asyncio.sleep(LLM_BACKOFF_SECONDS * (2 ** attempt) * CHAOS_BACKOFF_SCALE)
+                continue
+            break
         except APIError as exc:
             if not _transient(exc):
                 raise
@@ -131,7 +151,13 @@ ALLOWED_TOOLS = READ_TOOLS | WRITE_TOOLS
 # negócio. Memória, sessões e políticas são geridas pela plataforma — sem isso,
 # um agente "criativo" edita a própria memória e fura a trilha de auditoria
 # (supersessão). Enforcement no app, não só no prompt.
-WRITE_SCOPE = {"POC.support_orders"}
+WRITE_SCOPE = {f"{DB_MAIN}.support_orders"}
+# Alvos da política derivados do nome REAL do banco (db.DB_MAIN). Com
+# MONGODB_DB=POC_test (scripts isolados) o app e o MCP continuam apontando para
+# o mesmo lugar; com literais, um escreveria na demo e o outro no teste.
+ORDERS_TARGET = f"{DB_MAIN}.support_orders"
+SESSIONS_TARGET = f"{DB_MAIN}.agent_sessions"
+CATALOG_TARGET = f"{DB_CATALOG}.produtos_vector"
 # Além do escopo por collection, o FILTRO da escrita precisa mirar um pedido
 # específico: um agente alucinando (ou injetado) que tente update-many com
 # filtro vazio/amplo atualizaria a collection inteira. Defense in depth.
@@ -142,6 +168,10 @@ ORDER_FIELDS_FOR_AGENT = {"_id": 0, "order_id": 1, "product_name": 1, "sku": 1,
 SENSITIVE_FIELD_NAMES = {"name", "customer_name", "email", "address", "endereco",
                          "cpf", "card", "cartao", "phone", "telefone"}
 ORDER_ID_RE = re.compile(r"PED-[0-9]{4,12}")
+# Como o MongoDB MCP Server ANUNCIA um resultado vazio. Marcador textual, porque o
+# servidor devolve texto e não um envelope estruturado.
+EMPTY_RESULT_MARKERS = ("found 0 documents", "no documents", "nenhum documento",
+                        "0 document", "empty result")
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +227,7 @@ async def warm_up_session(session) -> float:
     started = time.perf_counter()
     try:
         await session.call_tool("aggregate", {
-            "database": "POC", "collection": "support_orders",
+            "database": DB_MAIN, "collection": "support_orders",
             "pipeline": [{"$match": {"order_id": "__warmup__"}}, {"$limit": 1}],
             "connectionId": await resolve_connection_id(session),
         })
@@ -214,10 +244,25 @@ def _is_empty_order_read(tool_name: str, target: str, text: str) -> bool:
     vazio e a ausência de qualquer id de pedido no retorno — assim a checagem
     sobrevive a mudanças de formatação do servidor MCP.
     """
-    if tool_name != "find" or target != "POC.support_orders":
+    if tool_name != "find" or target != ORDERS_TARGET:
         return False
     # Se veio QUALQUER id de pedido no retorno, houve resultado — não é vazio.
-    return not ORDER_ID_RE.search(text or "")
+    if ORDER_ID_RE.search(text or ""):
+        return False
+    # Ausência de id NÃO basta: um payload corrompido, truncado ou uma mensagem de
+    # erro do MCP também não têm id, e tratá-los como "nenhum documento" faz o
+    # agente AFIRMAR ao cliente que o pedido não existe a partir de um retorno que
+    # ele não entendeu. Revelado pelo cenário `tool_malformed_payload` da bateria
+    # de caos. Vazio agora tem que ser reconhecível: ou um JSON que é mesmo uma
+    # lista vazia, ou um dos marcadores textuais do MCP.
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    try:
+        parsed = json.loads(stripped)
+    except ValueError:
+        return any(marker in stripped.lower() for marker in EMPTY_RESULT_MARKERS)
+    return parsed in ([], {}, None)
 
 
 def _specific_order_id(tool_input: dict) -> str | None:
@@ -297,7 +342,7 @@ def _read_denial(tool_name: str, target: str, tool_input: dict,
     consegue ignorá-lo nem substituí-lo, ao contrário de uma instrução no prompt.
     """
     if tool_name == "find":
-        if target == "POC.support_orders":
+        if target == ORDERS_TARGET:
             order_id = _specific_order_id(tool_input)
             if order_id is None:
                 return "Leitura negada: pedidos exigem filtro por order_id específico."
@@ -313,7 +358,7 @@ def _read_denial(tool_name: str, target: str, tool_input: dict,
                 "projection": ORDER_FIELDS_FOR_AGENT,
             })
             return None
-        if target == "POC.agent_sessions":
+        if target == SESSIONS_TARGET:
             requested = tool_input.get("filter")
             if not isinstance(requested, dict) or requested.get("session_id") != conversation_id:
                 return "Leitura negada: o agente só pode consultar a conversa atual."
@@ -324,7 +369,7 @@ def _read_denial(tool_name: str, target: str, tool_input: dict,
         return f"Leitura negada: {tool_name} não é permitido em {target}."
 
     if tool_name == "aggregate":
-        if target == "POC.support_orders":
+        if target == ORDERS_TARGET:
             # Cadeia de trocas do pedido. Único ponto onde $graphLookup é alcançável, e ele
             # NÃO vem do modelo: extraímos só o order_id escalar do que veio e remontamos o
             # pipeline canônico, com o dono amarrado no $match e em cada salto. Um pipeline
@@ -339,7 +384,7 @@ def _read_denial(tool_name: str, target: str, tool_input: dict,
             tool_input.update({"database": database, "collection": collection,
                                "pipeline": build_order_chain_pipeline(order_id, user_key)})
             return None
-        if target != "POC.produtos_vector":
+        if target != CATALOG_TARGET:
             return "Leitura negada: aggregate é permitido somente no catálogo vetorial."
         pipeline = tool_input.get("pipeline")
         if not isinstance(pipeline, list) or not pipeline or "$vectorSearch" not in pipeline[0]:
@@ -396,7 +441,7 @@ def _read_denial(tool_name: str, target: str, tool_input: dict,
 
     return f"Leitura negada: ferramenta {tool_name} fora da política."
 
-SYSTEM = """Você é um agente de atendimento de um e-commerce, com acesso ao banco \
+_SYSTEM_TEMPLATE = """Você é um agente de atendimento de um e-commerce, com acesso ao banco \
 de dados MongoDB através de ferramentas (MongoDB MCP Server).
 
 Onde estão os dados:
@@ -465,6 +510,22 @@ cordialmente, diga o que você resolve e ofereça ajuda — sem chamar ferrament
 Seja eficiente: no máximo o necessário de chamadas. Não invente dados que não \
 vieram das ferramentas. Nunca exponha mensagem de erro técnico ao cliente: \
 traduza para o que ele pode fazer a seguir."""
+
+# O prompt cita os bancos pelo nome. Com MONGODB_DB apontando para o banco de
+# teste, citar "POC" mandaria o modelo montar chamadas para o banco da demo — e o
+# catálogo, que é leitura pura, pode ficar em outro banco ainda (DB_CATALOG).
+def _render_system(template: str) -> str:
+    # Sentinela antes da substituição global: senão a linha do catálogo, que já
+    # tinha sido resolvida, seria reescrita de novo pelo replace de DB_MAIN.
+    catalog_line = '- Catálogo de produtos para substituições: database "POC"'
+    rendered = template.replace(catalog_line, "\x00CATALOGO\x00")
+    rendered = rendered.replace('"POC"', f'"{DB_MAIN}"')
+    return rendered.replace(
+        "\x00CATALOGO\x00",
+        f'- Catálogo de produtos para substituições: database "{DB_CATALOG}"')
+
+
+SYSTEM = _render_system(_SYSTEM_TEMPLATE)
 
 # Sugestões de perguntas POR ÁREA: cada departamento vê chips que fazem sentido
 # para o seu contexto e referenciam os pedidos DO PRÓPRIO usuário (isolamento).
@@ -975,10 +1036,15 @@ async def _run_tool_loop(session, tools, system_static, system_dynamic, user_msg
                 try:
                     # depois da reescrita: a conexão é do servidor
                     tool_input["connectionId"] = await resolve_connection_id(session)
-                    result = await session.call_tool(tu.name, tool_input)
-                    text = _tool_text(result)
+                    # Fronteira única da tool: span, teto por chamada, circuit
+                    # breaker e ponto de caos. Sem isto, uma chamada MCP
+                    # pendurada segurava o turno até o deadline de 120s.
+                    result = await resilience.call_tool(
+                        tu.name, session.call_tool(tu.name, tool_input),
+                        **{"tool.target": target, "agent.name": "support_agent"})
+                    text = chaos.mangle("tool", tu.name, _tool_text(result))
                     is_error = bool(getattr(result, "isError", False))
-                    if tu.name == "aggregate" and target == "POC.support_orders" and not is_error:
+                    if tu.name == "aggregate" and target == ORDERS_TARGET and not is_error:
                         # A cadeia crua é um array aninhado; o que decide a resposta são os
                         # sinais (quantas reposições, mesmo SKU, precisa de qualidade). Resumir
                         # aqui, no servidor, evita gastar o orçamento de contexto com o array
@@ -997,7 +1063,10 @@ async def _run_tool_loop(session, tools, system_static, system_dynamic, user_msg
                             user_key, requested=_specific_order_id(tool_input)
                         )
                 except Exception as e:  # surface tool failures into the trace, don't crash
-                    text = f"Erro na ferramenta: {e}"
+                    # Degradação graciosa na fronteira da tool: o turno segue e o
+                    # modelo recebe um resultado HONESTO ("não há dado"), em vez de
+                    # um erro técnico que ele tentaria contornar inventando valor.
+                    text = resilience.degraded_tool_result(tu.name, e)
                     is_error = True
             if is_error:
                 # Erro de ferramenta no log do servidor (o trace não guarda resultado
@@ -1037,6 +1106,40 @@ async def _run_tool_loop(session, tools, system_static, system_dynamic, user_msg
     return final_answer
 
 
+async def run_loop_guarded(make_coro, *, emit, metrics) -> str:
+    """Executa o loop com deadline do turno e degradação graciosa (PADRÃO, sem flag).
+
+    Uma falha aqui — provedor esgotou retries, MCP caiu, circuito aberto, deadline
+    do turno — termina o turno com uma resposta explícita, o trace inteiro e a
+    memória curta gravada, em vez de perder a resposta num erro HTTP.
+    `SINGLEAGENT_LEGACY_500=1` reverte ao comportamento antigo (a exceção sobe).
+
+    É função de módulo, e não código solto dentro de `run_agent`, porque a bateria
+    de caos (`scripts/chaos_suite.py`) tem que exercitar ESTE caminho, não uma
+    reprodução dele.
+    """
+    try:
+        return await asyncio.wait_for(make_coro(), timeout=AGENT_TURN_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        emit("loop", "message", actor="agent",
+             text=f"Deadline do turno ({AGENT_TURN_TIMEOUT_SECONDS:.0f}s) atingido.")
+        metrics["degraded"] = True
+        metrics["degraded_reason"] = "turn_timeout"
+        observability.metrics.bump("agent_turns_degraded")
+        return ("A operação demorou mais que o esperado e foi interrompida. "
+                "Tente novamente em instantes.")
+    except Exception as exc:  # noqa: BLE001
+        if not resilience.graceful_degradation():
+            raise
+        logger.warning("loop do agente degradado: %s", exc, exc_info=True)
+        emit("loop", "message", actor="agent",
+             text=f"Falha no loop do agente ({type(exc).__name__}) — turno degradado.")
+        metrics["degraded"] = True
+        metrics["degraded_reason"] = type(exc).__name__
+        observability.metrics.bump("agent_turns_degraded")
+        return resilience.DEGRADED_TURN_REPLY
+
+
 async def _store_short_term(conversation_id, user_key, user_msg, final_answer,
                             emit, metrics) -> int:
     """$push this turn onto POC.agent_sessions — short-term (conversational) memory.
@@ -1073,7 +1176,7 @@ async def _store_short_term(conversation_id, user_key, user_msg, final_answer,
     metrics["writes"] += 1
     metrics["latency_ms"] += int((time.perf_counter() - sg0) * 1000)
     emit("store", "tool_call", actor="mongodb", tool="update-one ($push)",
-         args={"database": "POC", "collection": "agent_sessions",
+         args={"database": DB_MAIN, "collection": "agent_sessions",
                "filter": {"session_id": conversation_id, "user_key": user_key}},
          result=f"Turno salvo em agent_sessions (curto prazo) — {turn_count} mensagens.",
          reads=metrics["reads"], writes=metrics["writes"])
@@ -1208,6 +1311,7 @@ async def run_agent(
     lf_trace = None
     metrics = {
         "reads": 0, "writes": 0, "tools_used": 0, "latency_ms": 0,
+        "degraded": False, "degraded_reason": None,
         "input_tokens": 0, "output_tokens": 0,
         "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
         "memory_extractor_input_tokens": 0, "memory_extractor_output_tokens": 0,
@@ -1278,7 +1382,7 @@ async def run_agent(
     # Perceive — the customer message enters the loop (já sem PII em claro)
     emit("perceive", "message", actor="user", text=user_msg)
     emit("perceive", "tool_call", actor="mongodb", tool="find (app_users → area_profiles)",
-         args={"database": "POC/ai_brain", "filter": {"user_key": user_key}},
+         args={"database": f"{DB_MAIN}/ai_brain", "filter": {"user_key": user_key}},
          result=(f'Usuário "{user.get("name", user_key)}" → área "{profile_info["label"]}". '
                  "Persona, guardrails e cache deste turno seguem o perfil da área."),
          reads=metrics["reads"], writes=metrics["writes"])
@@ -1309,7 +1413,7 @@ async def run_agent(
         metrics["memory_extraction_skipped"] = True
         emit(
             "retrieve", "tool_call", actor="mongodb", tool="find (support_orders)",
-            args={"database": "POC", "collection": "support_orders", "filter": {"owner_user_key": user_key}},
+            args={"database": DB_MAIN, "collection": "support_orders", "filter": {"owner_user_key": user_key}},
             result="Solicitação fora de escopo redirecionada com os pedidos reais desta identidade.",
             reads=metrics["reads"], writes=metrics["writes"],
         )
@@ -1337,11 +1441,12 @@ async def run_agent(
              text="Cache semântico ignorado: a mensagem é pessoal (preferência/"
                   "tratamento) e depende da memória de longo prazo do usuário.")
     else:
-        cache_res = await cache.lookup(user_msg, area)
+        with observability.span("cache.lookup", **{"area": area, "step": "semantic_cache"}):
+            cache_res = await cache.lookup(user_msg, area)
         metrics["reads"] += 1
         emit("retrieve", "tool_call", actor="mongodb",
              tool="$vectorSearch (semantic_cache)",
-             args={"database": "POC", "collection": "semantic_cache",
+             args={"database": DB_MAIN, "collection": "semantic_cache",
                    "query": user_msg,
                    "filter": {"area": {"$in": ["global", area]}}},
              result=(f"CACHE HIT — score {cache_res['score']} ≥ {cache_res['threshold']}. "
@@ -1424,7 +1529,7 @@ async def run_agent(
             f"Memória longo prazo: {len(ltm['facts'])} fato(s) sobre o cliente."
         )
         emit("retrieve", "tool_call", actor="mongodb", tool=tool,
-             args={"database": "POC", "collection": "agent_memory",
+             args={"database": DB_MAIN, "collection": "agent_memory",
                    "query": user_msg if semantic else None,
                    "filter": {"user_key": user_key, "active": True}},
              result=detail,
@@ -1450,7 +1555,7 @@ async def run_agent(
     if history:
         metrics["reads"] += 1
         emit("retrieve", "tool_call", actor="mongodb", tool="find (agent_sessions)",
-             args={"database": "POC", "collection": "agent_sessions",
+             args={"database": DB_MAIN, "collection": "agent_sessions",
                    "filter": {"session_id": conversation_id},
                    "projection": {"turns": {"$slice": -HISTORY_TURNS}}},
              result=f"Memória curta: últimos {len(history)} turno(s) hidratados no contexto.",
@@ -1485,21 +1590,15 @@ async def run_agent(
                       + budget_block + summary_block)
 
     # ---- Agent tool-use loop --------------------------------------------------
-    try:
-        final_answer = await asyncio.wait_for(
-            _run_tool_loop(
-                session, tools, system_static, system_dynamic, user_msg, emit,
-                metrics, agent_model,
-                conversation_id, user_key, history=history,
-                fallback_model=agent_fallback_model, budget_brl=budget_brl,
-            ),
-            timeout=AGENT_TURN_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        emit("loop", "message", actor="agent",
-             text=f"Deadline do turno ({AGENT_TURN_TIMEOUT_SECONDS:.0f}s) atingido.")
-        final_answer = ("A operação demorou mais que o esperado e foi interrompida. "
-                        "Tente novamente em instantes.")
+    final_answer = await run_loop_guarded(
+        lambda: _run_tool_loop(
+            session, tools, system_static, system_dynamic, user_msg, emit,
+            metrics, agent_model,
+            conversation_id, user_key, history=history,
+            fallback_model=agent_fallback_model, budget_brl=budget_brl,
+        ),
+        emit=emit, metrics=metrics,
+    )
 
     # ---- Guardrail (output): redact PII before it reaches the user ------------
     guard_out = await guardrails.check_output(final_answer, user_key, conversation_id, area)
@@ -1555,7 +1654,7 @@ async def run_agent(
             emit("store", "tool_call", actor="mongodb",
                  tool="insert-one + update-one (agent_memory)" if superseded
                       else "insert-one (agent_memory)",
-                 args={"database": "POC", "collection": "agent_memory",
+                 args={"database": DB_MAIN, "collection": "agent_memory",
                        "filter": {"user_key": user_key},
                        "transaction": mem_tx or None},
                  result=detail,
@@ -1583,11 +1682,12 @@ async def run_agent(
             metrics["reads"] += 1
             personalized = store_cls["personal"]
         if not personalized:
-            await cache.store(user_msg, final_answer, agent_model, area=area)
+            with observability.span("cache.store", **{"area": area, "step": "semantic_cache"}):
+                await cache.store(user_msg, final_answer, agent_model, area=area)
             metrics["writes"] += 1
             cache_stored = True
             emit("store", "tool_call", actor="mongodb", tool="insert-one (semantic_cache)",
-                 args={"database": "POC", "collection": "semantic_cache"},
+                 args={"database": DB_MAIN, "collection": "semantic_cache"},
                  result="Resposta gravada no cache semântico para reuso futuro (com TTL).",
                  reads=metrics["reads"], writes=metrics["writes"])
         else:
@@ -1600,7 +1700,8 @@ async def run_agent(
     emit("loop", "message", actor="agent", text="Pronto para o próximo turno.")
 
     cache_res["stored"] = cache_stored
-    ltm_after = await memory.load_longterm(user_key)
+    with observability.span("memory.load_longterm", **{"step": "long_term_memory"}):
+        ltm_after = await memory.load_longterm(user_key)
     tracing.finish_trace(lf_trace, output_text=final_answer)
     return _result(scenario, user_msg, final_answer, conversation_id, turn_count,
                    trace, metrics, guard_in, cache_res,

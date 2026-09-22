@@ -35,6 +35,21 @@ MAX_TIME_MS = 10_000
 SESSION_IDLE_SECONDS = 86400
 logger = logging.getLogger("poc.db")
 
+# Nomes dos bancos: constantes, não literais espalhados. O default é o da demo;
+# os scripts que escrevem dado REAL (eval --live, benchmark de memória,
+# crash_resume do chaos) apontam para `<nome>_test` via env e assim não tocam a
+# demo — ver backend/scripts/isolation.py. A política de ferramentas do agente
+# (agent.py) deriva o alvo daqui, senão o app leria um banco e o MCP escreveria
+# no outro.
+DB_MAIN = os.getenv("MONGODB_DB", "POC")
+DB_BRAIN = os.getenv("MONGODB_BRAIN_DB", "ai_brain")
+# O catálogo (500k documentos + índice autoEmbed) é SOMENTE LEITURA: nenhum
+# caminho do agente escreve nele. Por isso ele continua no banco da demo mesmo
+# quando o resto aponta para o banco de teste — copiar meio milhão de documentos
+# e reconstruir o índice vetorial a cada rodada de eval não compraria isolamento
+# nenhum, já que não há escrita para isolar.
+DB_CATALOG = os.getenv("MONGODB_CATALOG_DB", "POC")
+
 _client: AsyncMongoClient | None = None
 
 
@@ -66,11 +81,11 @@ def get_client() -> AsyncMongoClient:
 
 
 def ai_brain():
-    return get_client()["ai_brain"]
+    return get_client()[DB_BRAIN]
 
 
 def poc():
-    return get_client()["POC"]
+    return get_client()[DB_MAIN]
 
 
 async def aggregate_list(coll, pipeline, *, length: int, **kwargs) -> list[dict]:

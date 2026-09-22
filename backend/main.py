@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 
 import auth
 import cache
-import guardrails
+import policy_guardrails as guardrails
 import guidance
 import memory
 import observability
@@ -144,6 +144,8 @@ async def lifespan(app: FastAPI):
         DEMO_TOKEN_ISSUANCE_ENABLED,
         CORS_ORIGINS,
     )
+    # Tracing distribuído (pov-shared): sink por env, PII sempre mascarada.
+    logger.info("tracing: sink=%s", observability.init_tracing_once())
     app.state.mcp_pool = [None] * MCP_POOL_SIZE
     app.state.mcp_errors = ["pool MCP ainda inicializando"] * MCP_POOL_SIZE
     app.state.mcp_rr_counter = itertools.count()

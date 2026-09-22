@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import agent  # noqa: E402
 import cache  # noqa: E402
-import guardrails  # noqa: E402
+import policy_guardrails as guardrails  # noqa: E402
 import guidance  # noqa: E402
 import memory  # noqa: E402
 

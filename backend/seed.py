@@ -765,22 +765,24 @@ SEMANTIC_CACHE_SEED = [
 # tipo "filter" na definição: o $vectorSearch aplica o filtro DURANTE a busca ANN
 # (pré-filtro nativo) — isolamento por área/usuário garantido pelo índice, não
 # pelo código. Creating them requires an M10+ / Flex cluster with autoEmbed.
+from db import DB_BRAIN as _DB_BRAIN, DB_MAIN as _DB_MAIN  # noqa: E402
+
 VECTOR_INDEXES = [
-    {"db": "POC", "collection": "semantic_cache", "name": "semantic_cache_vs",
+    {"db": _DB_MAIN, "collection": "semantic_cache", "name": "semantic_cache_vs",
      "path": "question", "filters": ["area"]},
-    {"db": "POC", "collection": "guardrail_denylist", "name": "guardrail_denylist_vs",
+    {"db": _DB_MAIN, "collection": "guardrail_denylist", "name": "guardrail_denylist_vs",
      "path": "phrase", "filters": ["area"]},
-    {"db": "POC", "collection": "agent_memory", "name": "agent_memory_vs",
+    {"db": _DB_MAIN, "collection": "agent_memory", "name": "agent_memory_vs",
      "path": "fact", "filters": ["user_key", "active"]},
     # Classificador de turno pessoal vs genérico (turn_classifier.py)
-    {"db": "ai_brain", "collection": "turn_probes", "name": "turn_probes_vs",
+    {"db": _DB_BRAIN, "collection": "turn_probes", "name": "turn_probes_vs",
      "path": "phrase", "filters": []},
 ]
 
 # BM25 (Atlas Search) sobre os fatos: metade lexical do retrieval híbrido da
 # memória longa (vector + BM25 fundidos com RRF em memory.load_relevant).
 BM25_INDEXES = [
-    {"db": "POC", "collection": "agent_memory", "name": "agent_memory_bm25",
+    {"db": _DB_MAIN, "collection": "agent_memory", "name": "agent_memory_bm25",
      "definition": {"mappings": {"dynamic": False, "fields": {
          "fact": {"type": "string"},
          "user_key": {"type": "token"},
@@ -876,7 +878,9 @@ def main():
 
     client = MongoClient(uri, serverSelectionTimeoutMS=10_000)
     client.admin.command("ping")
-    db = client["ai_brain"]
+    # Nome do banco vem de db.DB_BRAIN/DB_MAIN (env MONGODB_BRAIN_DB/MONGODB_DB):
+    # é assim que o banco de TESTE isolado é semeado sem tocar o da demo.
+    db = client[_DB_BRAIN]
 
     for tmpl in PROMPT_TEMPLATES:
         db["prompt_templates"].replace_one({"_id": tmpl["_id"]}, tmpl, upsert=True)
@@ -899,7 +903,7 @@ def main():
         db["area_profiles"].replace_one({"_id": profile["_id"]}, profile, upsert=True)
 
     # support_orders lives in POC, next to the product catalog the agent searches
-    poc = client["POC"]
+    poc = client[_DB_MAIN]
 
     # Usuários: identidade → área (o seletor de usuário do frontend lê daqui).
     # Remove identidades de seeds antigos (ex.: ana.sup/carlos.fin) para o
@@ -1112,7 +1116,7 @@ def main():
     print("\nÍndices vetoriais (autoEmbed voyage-4):")
     create_vector_indexes(client)
     from seed_turn_probes import seed_probes_and_config
-    seed_probes_and_config(client["ai_brain"])
+    seed_probes_and_config(client[_DB_BRAIN])
 
 
 if __name__ == "__main__":

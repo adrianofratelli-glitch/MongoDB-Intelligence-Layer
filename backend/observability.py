@@ -95,3 +95,83 @@ class Metrics:
 
 
 metrics = Metrics()
+
+
+# ---------------------------------------------------------------- tracing (_shared)
+# O tracing distribuído vem do pacote comum `pov-shared` (`tracing.init_tracing`),
+# não de código local: os PoVs do portfólio têm que produzir spans com o MESMO
+# formato para serem comparados lado a lado. O Langfuse (backend/langfuse_tracing.py)
+# continua existindo — ele é a visão de PRODUTO do turno (custo/cache na Aba 3);
+# isto aqui é a visão de INFRA (span por etapa, latência, erro, sink plugável).
+#
+# NOTA DE IMPORT: o módulo do _shared se chama `tracing`; o módulo local do
+# Langfuse foi renomeado para `langfuse_tracing` justamente para não sombreá-lo,
+# já que `backend/` é a raiz do sys.path deste PoV.
+#
+#     TRACE_SINK=off|console|phoenix|atlas   (default off — zero overhead)
+#     TRACE_MASK_PII=1                       forçado aqui, SEMPRE (ver abaixo)
+
+TRACE_SERVICE_NAME = os.getenv("TRACE_SERVICE_NAME", "singleagent")
+_tracer = None
+_trace_sink = "off"
+
+
+def init_tracing_once() -> str:
+    """Liga o tracing do _shared no startup. Fail-open: nunca derruba o backend.
+
+    `TRACE_MASK_PII=1` é ESCRITO aqui antes de inicializar, não apenas
+    recomendado: os spans carregam mensagem do cliente, resultado de tool e
+    prompt. Esta PoV mascara PII antes do LLM (ver CLAUDE.md) — o span não pode
+    ser a porta dos fundos por onde o dado cru sai do processo. Quem quiser
+    conteúdo cru tem que mudar o código, não uma variável de ambiente.
+    """
+    global _tracer, _trace_sink
+    os.environ["TRACE_MASK_PII"] = "1"
+    try:
+        from tracing import init_tracing  # pov-shared
+        _trace_sink = init_tracing(TRACE_SERVICE_NAME)
+        if _trace_sink != "off":
+            from opentelemetry import trace as _otel
+            _tracer = _otel.get_tracer(TRACE_SERVICE_NAME)
+    except Exception:  # noqa: BLE001 — observability nunca derruba o processo
+        logging.getLogger("poc.observability").warning(
+            "tracing do _shared indisponível; seguindo sem spans", exc_info=True)
+        _tracer, _trace_sink = None, "off"
+    return _trace_sink
+
+
+def trace_sink() -> str:
+    return _trace_sink
+
+
+def active() -> bool:
+    return _tracer is not None
+
+
+class _NullSpan:
+    """Sem sink configurado, `span()` não aloca nada e não muda o caminho quente."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def set_attribute(self, *_args):
+        return None
+
+
+_NULL_SPAN = _NullSpan()
+
+
+def span(name: str, **attributes):
+    """Um passo do turno (tool, chamada de LLM, leitura/escrita de memória).
+
+    Os atributos-base são os mesmos do PoV multiagente onde fazem sentido
+    (`tool.name`, `agent.name`, `area`, `user_key` já mascarado por chave opaca),
+    para os dois relatórios falarem a mesma língua.
+    """
+    if _tracer is None:
+        return _NULL_SPAN
+    return _tracer.start_as_current_span(
+        name, attributes={k: v for k, v in attributes.items() if v is not None})
