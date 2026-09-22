@@ -23,7 +23,7 @@ Os cenários offline usam sessão MCP falsa e cliente de LLM falso, mas executam
 banco de TESTE isolado (`POC_test`/`ai_brain_test`, `backend/scripts/isolation.py`) — nunca o da
 demo, que é recusado sem `ALLOW_DEMO_DB_WRITE=1`.
 
-## Resultado (última execução: 11/11)
+## Resultado (última execução: 12/12)
 
 | Cenário | O que injeta | Assertion | Resultado |
 |---|---|---|---|
@@ -38,6 +38,7 @@ demo, que é recusado sem `ALLOW_DEMO_DB_WRITE=1`.
 | `turn_timeout` | LLM travado, `AGENT_TURN_TIMEOUT_SECONDS=1` | corta em ~1s com `degraded_reason=turn_timeout` | PASS (1,00s) |
 | `live_degraded_turn` | `run_agent` inteiro com o MCP falhando (Atlas real) | resposta degradada + trace completo + turno gravado, sem exceção | PASS (7,94s) |
 | `crash_resume` | `SIGKILL` no processo depois de gravar o turno | a sessão continua legível em `agent_sessions` (2 turnos persistidos) | PASS (6,61s) |
+| `crash_mid_tool` | `SIGKILL` **dentro** de uma chamada de ferramenta pendurada | nenhuma sessão meio-escrita e a MESMA conversa segue utilizável no turno seguinte | PASS (20,28s) |
 
 ## Bugs REAIS revelados e corrigidos
 
@@ -79,10 +80,13 @@ Nenhum dos quatro exigiu mudança de arquitetura.
 * **Os cenários offline não exercitam o MCP real nem o provedor real.** Eles exercitam o loop
   real com as bordas falsas; quem cobre o MCP de verdade é `tests/test_mcp_contract.py` (binário
   pinado) e os cenários `LIVE=1`.
-* **`crash_resume` prova persistência, não retomada de contexto no meio de uma chamada de
-  ferramenta.** O que sobrevive é o que já foi gravado em `agent_sessions`; uma chamada de tool
-  em voo no instante do `SIGKILL` é perdida, sem checkpoint intermediário. Isto é uma decisão
-  desta PoV (não há checkpointer transacional por passo), não um resultado do teste.
+* **Crash no meio de uma tool: o estado não fica pela metade, e a conversa continua usável — mas
+  o turno interrompido é PERDIDO.** Medido por `crash_mid_tool`: depois do `SIGKILL`, `agent_sessions`
+  tinha 0 turnos meio-escritos (a escrita de curto prazo só acontece DEPOIS do loop, então ou o
+  turno existe completo, ou não existe) e o turno seguinte na mesma conversa respondeu e gravou
+  normalmente. O que esta PoV **não** tem é checkpoint por passo: a chamada de ferramenta em voo
+  não é retomada, o cliente precisa repetir a pergunta. Isso é decisão de arquitetura (nenhum
+  checkpointer transacional por passo), agora com o comportamento medido em vez de suposto.
 * **Não há streaming do provedor neste loop**, então "falha no meio do stream" foi implementada
   como a falha equivalente: o provedor falha em todas as tentativas depois de já ter sido
   chamado (`llm_500_persistent`).

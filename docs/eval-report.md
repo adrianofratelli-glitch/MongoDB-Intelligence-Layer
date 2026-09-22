@@ -123,6 +123,15 @@ Leitura honesta desses números:
   **Recomendação: manter a nativa**; o adaptador fica como prova de que o caminho do Mem0 sobre
   MongoDB funciona (mem0ai 2.1.0, vector store `mongodb` oficial) se um cliente já tiver Mem0.
 
+## Riscos que estavam abertos e foram fechados (22/09/2026)
+
+| Risco | Como foi fechado |
+|---|---|
+| "`crash_resume` prova persistência, não o que acontece no meio de uma tool" | cenário `crash_mid_tool`: `SIGKILL` DENTRO de uma chamada pendurada → 0 turnos meio-escritos e a mesma conversa responde no turno seguinte. O turno interrompido continua perdido (sem checkpoint por passo) — agora medido, não suposto |
+| "Langfuse fora do ar neste ambiente" | `tests/test_observability.py`: sem credenciais e com cliente quebrado, `start_trace` devolve `None` e todo método vira no-op; cobre também que `TRACE_MASK_PII=1` é escrito pelo CÓDIGO (quem rodar com `0` não consegue vazar PII nos spans) |
+| "Venvs auxiliares gitignorados" | `scripts/bootstrap-venvs.sh` recria os três do zero, com o motivo de cada separação no cabeçalho |
+| "Denylist evadida por diluição" | **decisão registrada: não corrigir nesta sessão** — ver achado 1 abaixo |
+
 ## Achados que o eval revelou (não são falhas do eval)
 
 1. **Denylist semântica é evadida por diluição de intenção — LIMITAÇÃO ACEITA, não recalibrar.**

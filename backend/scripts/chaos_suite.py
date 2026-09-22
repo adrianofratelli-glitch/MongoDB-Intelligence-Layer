@@ -450,6 +450,83 @@ async def scenario_crash_resume() -> Verdict:
                    f"turnos persistidos={turns} (processo morto com SIGKILL)", elapsed)
 
 
+async def scenario_crash_mid_tool() -> Verdict:
+    """LIVE: SIGKILL DENTRO de uma chamada de ferramenta — o estado não fica pela metade."""
+    assertion = ("processo morto no meio de uma tool → nenhuma sessão meio-escrita em "
+                 "agent_sessions e o turno seguinte na MESMA conversa funciona normalmente")
+    if os.getenv("LIVE", "").strip() not in {"1", "true", "yes"}:
+        return Verdict("crash_mid_tool", assertion, False,
+                       "LIVE=1 ausente — cenário não roda contra Atlas", 0.0, skipped=True)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import isolation
+
+    main_db, brain_db = isolation.test_database_names()
+    isolation.guard(main_db, brain_db, what="chaos_suite crash_mid_tool")
+    conversation = f"conv_midtool_{os.getpid()}"
+    start = perf_counter()
+    child = await asyncio.create_subprocess_exec(
+        sys.executable, str(Path(__file__).resolve().parent / "crash_child.py"),
+        conversation, "mid_tool",
+        env={**os.environ, "MONGODB_DB": main_db, "MONGODB_BRAIN_DB": brain_db},
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+
+    # Espera o filho avisar que JÁ está dentro do turno; sem isso o kill poderia
+    # cair antes de qualquer escrita e o cenário não provaria nada.
+    try:
+        while True:
+            line = await asyncio.wait_for(child.stdout.readline(), timeout=90)
+            if not line:
+                break
+            if b"PRONTO" in line:
+                break
+    except asyncio.TimeoutError:
+        child.kill()
+        return Verdict("crash_mid_tool", assertion, False,
+                       "filho não chegou a entrar no turno em 90s", perf_counter() - start)
+    await asyncio.sleep(3)            # deixa o turno entrar na tool pendurada
+    child.kill()                      # SIGKILL no meio da chamada de ferramenta
+    await child.communicate()
+
+    from pymongo import MongoClient
+
+    client = MongoClient(os.environ["MONGODB_URI"], serverSelectionTimeoutMS=15_000)
+    doc = client[main_db]["agent_sessions"].find_one({"session_id": conversation})
+    turns = (doc or {}).get("turns") or []
+    # Nada pela metade: ou o turno não existe (a escrita de curto prazo só acontece
+    # DEPOIS do loop), ou existe completo, com pergunta E resposta.
+    half_written = [t for t in turns
+                    if not (t.get("user") or t.get("user_message"))
+                    or not (t.get("answer") or t.get("agent"))]
+    client.close()
+
+    # Segunda metade da assertion: a MESMA conversa continua utilizável depois do
+    # crash — o turno seguinte responde e é gravado, sem herdar lixo.
+    isolation.use_test_databases(what="chaos_suite crash_mid_tool (retomada)")
+    import agent
+
+    original = agent.anthropic_client
+    agent.anthropic_client = FakeLLM()
+    agent.resolve_connection_id = lambda _s: _connection_id()
+    try:
+        with env(CHAOS=None, TOOL_TIMEOUT_SECONDS="20"):
+            resumed = await agent.run_agent(
+                FakeSession(), scenario=None, message="e agora, conseguiu ver?",
+                conversation_id=conversation, user_key="cliente-demo")
+        resumed_ok = bool((resumed.get("answer") or "").strip())
+    except Exception as exc:  # noqa: BLE001 — retomar é parte da assertion
+        resumed_ok, resumed = False, {"erro": f"{type(exc).__name__}: {exc}"}
+    finally:
+        agent.anthropic_client = original
+
+    client = MongoClient(os.environ["MONGODB_URI"], serverSelectionTimeoutMS=15_000)
+    client[main_db]["agent_sessions"].delete_many({"session_id": conversation})
+    client.close()
+    elapsed = perf_counter() - start
+    return Verdict("crash_mid_tool", assertion, (not half_written) and resumed_ok,
+                   f"turnos apos o kill={len(turns)} meio-escritos={len(half_written)} "
+                   f"retomada_ok={resumed_ok}", elapsed)
+
+
 SCENARIOS = {
     "tool_timeout": scenario_tool_timeout,
     "mcp_session_down": scenario_mcp_session_down,
@@ -462,6 +539,7 @@ SCENARIOS = {
     "turn_timeout": scenario_turn_timeout,
     "live_degraded_turn": scenario_live_degraded_turn,
     "crash_resume": scenario_crash_resume,
+    "crash_mid_tool": scenario_crash_mid_tool,
 }
 
 
