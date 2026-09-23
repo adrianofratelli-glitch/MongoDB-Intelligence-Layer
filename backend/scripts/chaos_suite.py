@@ -539,10 +539,22 @@ async def scenario_live_degraded_turn() -> Verdict:
 
 
 async def scenario_stale_checkpoint_recovery() -> Verdict:
-    """Checkpoint de turno anterior interrompido: detectado, avisado e limpo."""
-    assertion = ("pending_turn 'in_progress' de um crash anterior → o próximo turno na "
-                 "MESMA conversa detecta, emite um evento de retomada, e limpa o "
-                 "checkpoint (não fica pendurado para sempre)")
+    """Testa especificamente a LEITURA/RETOMADA do checkpoint (`agent.interrupted_turn`),
+    não a gravação nem o crash em si — isso é `crash_mid_tool`, que testa o processo
+    morrendo no meio de uma tool. Aqui o checkpoint órfão já existe de antemão (escrito
+    direto via `open_turn`, sem matar processo nenhum); o que se testa é se o PRÓXIMO
+    turno na mesma conversa detecta, avisa e limpa — o código que dá sentido a
+    `interrupted_turn` ter deixado de ser função morta.
+
+    `open_turn`/`interrupted_turn` rodam SEM FLAG em todo turno real (não é caminho só
+    de teste); este cenário prova o comportamento do ramo condicional (checkpoint órfão
+    presente), não o custo incondicional (a leitura extra, que roda sempre e não tem
+    cenário próprio porque não muda resultado, só latência).
+    """
+    assertion = ("pending_turn 'in_progress' JÁ EXISTENTE (não gerado por crash neste "
+                 "cenário — ver crash_mid_tool para isso) → o próximo turno na MESMA "
+                 "conversa detecta via interrupted_turn, emite um evento de retomada, "
+                 "e limpa o checkpoint (não fica pendurado para sempre)")
     if os.getenv("LIVE", "").strip() not in {"1", "true", "yes"}:
         return Verdict("stale_checkpoint_recovery", assertion, False,
                        "LIVE=1 ausente — cenário não roda contra Atlas", 0.0, skipped=True)

@@ -137,6 +137,23 @@ limitação está em `CLAUDE.md`, no `README.md` e em `docs/eval-report.md` (cas
 eval). A defesa em profundidade segurou o caso medido — a reescrita de política negou a leitura
 ampla no servidor e nenhum dado vazou.
 
+## Nota para quem construir um painel de trace mais completo (aqui ou noutra PoV)
+
+Não é atrito com o `_shared` — é um aviso de acoplamento silencioso que vale registrar porque o
+mesmo padrão (checkpoint de turno + trace por eventos) provavelmente se repete em outras PoVs do
+portfólio (o multiagente tem supervisor/handoff com formato parecido).
+
+`agent.open_turn`/`agent.interrupted_turn` (checkpoint de turno, ver `CLAUDE.md`) rodam
+INCONDICIONALMENTE em todo turno real, sem flag — 1 leitura Mongo extra sempre. A mensagem de
+recuperação de checkpoint órfão (`kind: "message"`, `phase: "perceive"`) hoje não aparece em
+nenhuma UI porque `frontend/src/tabs/Agent.jsx` só renderiza trace `kind === 'tool_call'` e
+`'reasoning'`, e o spinner ao vivo usa só um rótulo fixo por `phase`, nunca `event.text`. Isso é
+um fato FRÁGIL do estado atual do frontend, não uma garantia de design: um painel de "trace
+completo" (ou mudar o filtro de kinds renderizados) faz esse texto aparecer ao cliente sem
+revisão prévia. Quem for adicionar visualização de trace mais completa — aqui ou copiando o
+padrão para outra PoV — precisa auditar TODOS os eventos `kind: "message"` do backend antes de
+renderizá-los como estão, não só os novos que for adicionando.
+
 ## Resumo para o dono do `_shared`
 
 | Item | Severidade | Ação sugerida |
