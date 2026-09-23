@@ -76,6 +76,23 @@ def get_client() -> AsyncMongoClient:
             maxPoolSize=int(os.getenv("MONGODB_MAX_POOL_SIZE", "50")),
             minPoolSize=int(os.getenv("MONGODB_MIN_POOL_SIZE", "5")),
             maxIdleTimeMS=int(os.getenv("MONGODB_MAX_IDLE_TIME_MS", "30000")),
+            # EXPLÍCITO, embora seja o default do driver: é a resposta à pergunta
+            # "e quando o primário cair?". Num step-down (eleição de ~2-10s num
+            # replica set do Atlas) o driver reexecuta a operação no novo primário
+            # sozinho — o turno do agente não vê nada. O app só enxerga a falha
+            # se o retry TAMBÉM esgotar, e aí degrada com mensagem de conexão
+            # (ver `safe_query` e `agent.run_loop_guarded`). Deixar implícito faria
+            # a resiliência parecer acidental; aqui ela é declarada e verificável
+            # (`scripts/preflight.py` confere, `chaos_suite.py atlas_failover` mede).
+            retryWrites=True,
+            retryReads=True,
+            # CSOT (Client-Side Operation Timeout): UM orçamento por operação que
+            # cobre seleção de servidor, handshake, envio e resposta — inclusive os
+            # retries acima. Antes havia só maxTimeMS por consulta (tempo de
+            # execução NO servidor) e serverSelectionTimeoutMS, cada um por conta
+            # própria: uma operação podia gastar os dois em sequência. Default 15s,
+            # acima do maxTimeMS de 10s para o erro específico da consulta vencer.
+            timeoutMS=int(os.getenv("MONGODB_TIMEOUT_MS", "15000")),
         )
     return _client
 
@@ -94,6 +111,16 @@ async def aggregate_list(coll, pipeline, *, length: int, **kwargs) -> list[dict]
     return await cursor.to_list(length=length)
 
 
+def _chaos_enabled() -> bool:
+    return os.getenv("CHAOS", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _chaos_hook() -> None:
+    import chaos
+
+    await chaos.hook("mongo", name="safe_query")
+
+
 class SafeQueryError(Exception):
     """Operational error carrying a UI-ready message."""
 
@@ -108,8 +135,23 @@ async def safe_query(awaitable):
 
     maxTimeMS is passed on each call (find/aggregate); here we handle what
     slips through: timeouts, missing search index, mongot restarting, network.
+
+    É também a FRONTEIRA única do MongoDB no app, então é aqui que a bateria de
+    caos injeta os modos de falha próprios do Atlas (step-down de primário,
+    `mongot` fora). Sem `CHAOS=1` isto é uma leitura de variável de ambiente.
     """
     try:
+        if _chaos_enabled():
+            try:
+                await _chaos_hook()
+            except BaseException:
+                # A corrotina do chamador nunca chegou a ser aguardada — sem isto,
+                # cada cenário de caos que injeta aqui deixa um "coroutine was
+                # never awaited" no log, poluindo a saída da bateria (medido:
+                # 3 avisos numa execução completa). Mesmo padrão de
+                # `resilience.call_tool`.
+                awaitable.close()
+                raise
         return await awaitable
     except (ExecutionTimeout, NetworkTimeout, WTimeoutError):
         raise SafeQueryError(

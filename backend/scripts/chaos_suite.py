@@ -44,6 +44,13 @@ import resilience  # noqa: E402
 TOOLS = [{"name": "find", "description": "find", "input_schema": {"type": "object"}}]
 
 
+def _db_main() -> str:
+    """Nome do banco que a política do agente espera AGORA (demo ou teste)."""
+    import db
+
+    return db.DB_MAIN
+
+
 # ---------------------------------------------------------------- mundo de teste
 
 
@@ -116,7 +123,11 @@ class FakeLLM:
             return FakeResponse([
                 FakeBlock("text", text="Vou consultar o pedido."),
                 FakeBlock("tool_use", id=f"tu_{self.round}", name="find",
-                          input={"database": "POC", "collection": "support_orders",
+                          # O banco vem de db.DB_MAIN: com MONGODB_DB=POC_test a
+                          # política REESCREVE/NEGA por alvo, então um "POC" fixo
+                          # aqui fazia a chamada ser negada e o turno terminar sem
+                          # nunca entrar na ferramenta — o cenário media outra coisa.
+                          input={"database": _db_main(), "collection": "support_orders",
                                  "filter": {"order_id": "PED-1001"}}),
             ])
         return FakeResponse([FakeBlock("text", text="Seu pedido está entregue.")])
@@ -376,6 +387,122 @@ async def scenario_turn_timeout() -> Verdict:
                    f"{elapsed:.2f}s motivo={metrics['degraded_reason']}", elapsed)
 
 
+async def scenario_atlas_retry_semantics() -> Verdict:
+    """O que segura um step-down de primário é o DRIVER, e isso é verificável."""
+    assertion = ("o cliente declara retryWrites/retryReads e um orçamento CSOT por "
+                 "operação — é o driver que reexecuta no novo primário, não o app")
+    import db
+
+    start = perf_counter()
+    options = db.get_client().options
+    ok = (options.retry_writes is True and options.retry_reads is True
+          and options.timeout is not None and options.timeout > 0)
+    elapsed = perf_counter() - start
+    return Verdict("atlas_retry_semantics", assertion, ok,
+                   f"retryWrites={options.retry_writes} retryReads={options.retry_reads} "
+                   f"timeoutMS={options.timeout} maxPoolSize={options.pool_options.max_pool_size}",
+                   elapsed)
+
+
+async def scenario_atlas_failover() -> Verdict:
+    """Step-down cujo retry do driver TAMBÉM esgota: o turno degrada, não some."""
+    assertion = ("NotPrimaryError sobrevivendo ao retry do driver → SafeQueryError de "
+                 "conexão (mensagem de UI, nunca stack trace) e o turno termina degradado, "
+                 "sem perder o trace")
+    import agent
+    import db
+
+    start = perf_counter()
+    async def read():
+        return {"ok": 1}
+
+    mapped = None
+    with env(CHAOS="1", CHAOS_SCENARIO="not_primary", CHAOS_TARGET="mongo"):
+        try:
+            await db.safe_query(read())
+        except db.SafeQueryError as exc:
+            mapped = exc
+        except Exception as exc:  # noqa: BLE001 — erro cru vazando é a falha
+            mapped = exc
+
+    metrics = {"degraded": False, "degraded_reason": None}
+    async def failing_turn():
+        with env(CHAOS="1", CHAOS_SCENARIO="not_primary", CHAOS_TARGET="mongo"):
+            await db.safe_query(read())
+
+    answer = await agent.run_loop_guarded(failing_turn, emit=lambda *a, **k: None,
+                                          metrics=metrics)
+    elapsed = perf_counter() - start
+    ok = (isinstance(mapped, db.SafeQueryError) and mapped.kind == "conexao"
+          and metrics["degraded"] and bool(answer))
+    return Verdict("atlas_failover", assertion, ok,
+                   f"kind={getattr(mapped, 'kind', type(mapped).__name__)} "
+                   f"degradou={metrics['degraded']} motivo={metrics['degraded_reason']}", elapsed)
+
+
+async def scenario_search_unavailable() -> Verdict:
+    """`mongot` fora: cada camada cai no fallback que a política da área manda."""
+    assertion = ("$vectorSearch falhando → SafeQueryError kind='search'; o cache cai para "
+                 "match exato e a memória para os fatos recentes, sem derrubar o turno")
+    import db
+
+    start = perf_counter()
+    async def search():
+        return []
+
+    mapped = None
+    with env(CHAOS="1", CHAOS_SCENARIO="search_down", CHAOS_TARGET="mongo"):
+        try:
+            await db.safe_query(search())
+        except db.SafeQueryError as exc:
+            mapped = exc
+        except Exception as exc:  # noqa: BLE001
+            mapped = exc
+    elapsed = perf_counter() - start
+    ok = (isinstance(mapped, db.SafeQueryError) and mapped.kind == "search"
+          and "produtos_vector" in mapped.message or "índice" in getattr(mapped, "message", ""))
+    return Verdict("search_unavailable", assertion, ok,
+                   f"kind={getattr(mapped, 'kind', type(mapped).__name__)}: "
+                   f"{getattr(mapped, 'message', '')[:80]}", elapsed)
+
+
+async def scenario_guardrail_fails_closed() -> Verdict:
+    """Sem a camada semântica, quem decide é o DOCUMENTO de política, não o código."""
+    assertion = ("com o denylist vetorial fora: política semantic_fail_mode='closed' bloqueia "
+                 "a entrada; trocando o MESMO campo para 'open' a área volta a atender — "
+                 "sem deploy, sem mudar código")
+    import policy_guardrails as guardrails
+
+    start = perf_counter()
+    original_search = guardrails._semantic_denylist
+    original_policy = guardrails.get_policy
+
+    async def broken(_text, _threshold, _area):
+        return None, False, None          # camada semântica indisponível
+
+    async def policy_with(mode):
+        base = await original_policy("default")
+        return {**base, "semantic_fail_mode": mode}
+
+    guardrails._semantic_denylist = broken
+    try:
+        guardrails.get_policy = lambda area="default": policy_with("closed")
+        closed = await guardrails.check_input("qual o status do meu pedido", "cliente-demo",
+                                              "conv_chaos", "default")
+        guardrails.get_policy = lambda area="default": policy_with("open")
+        opened = await guardrails.check_input("qual o status do meu pedido", "cliente-demo",
+                                              "conv_chaos", "default")
+    finally:
+        guardrails._semantic_denylist = original_search
+        guardrails.get_policy = original_policy
+
+    elapsed = perf_counter() - start
+    ok = closed["action"] == "block" and opened["action"] == "allow"
+    return Verdict("guardrail_fails_closed", assertion, ok,
+                   f"closed={closed['action']} open={opened['action']} "
+                   f"(a demo roda fail-closed em TODA área — ADR-001 risco 3)", elapsed)
+
+
 async def scenario_live_degraded_turn() -> Verdict:
     """LIVE: run_agent inteiro contra o banco de TESTE, com o MCP falhando."""
     assertion = ("run_agent com MCP falhando → resposta degradada, trace completo e turno "
@@ -409,6 +536,49 @@ async def scenario_live_degraded_turn() -> Verdict:
                        f"exceção subiu: {type(exc).__name__}: {exc}", perf_counter() - start)
     finally:
         agent.anthropic_client = original
+
+
+async def scenario_stale_checkpoint_recovery() -> Verdict:
+    """Checkpoint de turno anterior interrompido: detectado, avisado e limpo."""
+    assertion = ("pending_turn 'in_progress' de um crash anterior → o próximo turno na "
+                 "MESMA conversa detecta, emite um evento de retomada, e limpa o "
+                 "checkpoint (não fica pendurado para sempre)")
+    if os.getenv("LIVE", "").strip() not in {"1", "true", "yes"}:
+        return Verdict("stale_checkpoint_recovery", assertion, False,
+                       "LIVE=1 ausente — cenário não roda contra Atlas", 0.0, skipped=True)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import isolation
+
+    isolation.use_test_databases(what="chaos_suite stale_checkpoint_recovery")
+    import agent
+    from db import poc
+
+    start = perf_counter()
+    conversation = f"conv_stale_{os.getpid()}"
+    await poc()["agent_sessions"].delete_many({"session_id": conversation})
+    await agent.open_turn(conversation, "cliente-demo", "pergunta anterior perdida")
+
+    session = FakeSession()
+    original = agent.anthropic_client
+    agent.anthropic_client = FakeLLM()
+    agent.resolve_connection_id = lambda _s: _connection_id()
+    try:
+        with env(CHAOS=None, TOOL_TIMEOUT_SECONDS="20"):
+            result = await agent.run_agent(
+                session, scenario=None, message="qual o status do meu pedido PED-1001?",
+                conversation_id=conversation, user_key="cliente-demo")
+        announced = any("interrompido" in (e.get("text") or "") for e in result.get("trace") or [])
+        cleared = await agent.interrupted_turn(conversation, "cliente-demo")
+        ok = announced and cleared is None
+        return Verdict("stale_checkpoint_recovery", assertion, ok,
+                       f"anunciado={announced} checkpoint_limpo={cleared is None}",
+                       perf_counter() - start)
+    except Exception as exc:  # noqa: BLE001
+        return Verdict("stale_checkpoint_recovery", assertion, False,
+                       f"exceção subiu: {type(exc).__name__}: {exc}", perf_counter() - start)
+    finally:
+        agent.anthropic_client = original
+        await poc()["agent_sessions"].delete_many({"session_id": conversation})
 
 
 async def scenario_crash_resume() -> Verdict:
@@ -450,10 +620,151 @@ async def scenario_crash_resume() -> Verdict:
                    f"turnos persistidos={turns} (processo morto com SIGKILL)", elapsed)
 
 
+class FakeApp:
+    """O suficiente de FastAPI para exercitar o pool REAL de `main.py`."""
+
+    class _State:
+        pass
+
+    def __init__(self, size: int):
+        import itertools
+
+        self.state = self._State()
+        self.state.mcp_pool = [None] * size
+        self.state.mcp_errors = [None] * size
+        self.state.mcp_rr_counter = itertools.count()
+
+
+async def scenario_mcp_pool_round_robin() -> Verdict:
+    """Slot morto no pool: o round-robin pula e o turno continua sendo servido."""
+    assertion = ("com 1 de 3 slots caídos, get_mcp_session NUNCA devolve o slot morto "
+                 "e distribui entre os vivos; com todos caídos devolve None (sem exceção)")
+    import main
+
+    start = perf_counter()
+    app = FakeApp(3)
+    alive_a, alive_c = FakeSession(), FakeSession()
+    app.state.mcp_pool = [alive_a, None, alive_c]   # slot 1 reconectando
+    picks = [main.get_mcp_session(app) for _ in range(9)]
+    never_dead = all(p is not None for p in picks)
+    both_used = {id(p) for p in picks} == {id(alive_a), id(alive_c)}
+
+    app.state.mcp_pool = [None, None, None]         # pool inteiro caído
+    empty = main.get_mcp_session(app)
+    elapsed = perf_counter() - start
+    ok = never_dead and both_used and empty is None
+    return Verdict("mcp_pool_round_robin", assertion, ok,
+                   f"escolhas={len(picks)} sem_slot_morto={never_dead} "
+                   f"usou_os_dois_vivos={both_used} pool_vazio={empty is None}", elapsed)
+
+
+async def scenario_mcp_pool_slot_isolation() -> Verdict:
+    """Um subprocess travado não pode derrubar os requests que caberiam nos outros slots."""
+    assertion = ("slot pendurado + slots sadios → turnos concorrentes terminam pelos slots "
+                 "vivos dentro do teto por tool, sem esperar o travado")
+    import main
+
+    start = perf_counter()
+    app = FakeApp(3)
+
+    async def hang(_name, _args):
+        await asyncio.sleep(30)
+
+    app.state.mcp_pool = [FakeSession(hang), FakeSession(), FakeSession()]
+    with env(CHAOS=None, TOOL_TIMEOUT_SECONDS="2"):
+        results = await asyncio.gather(*[
+            _loop(main.get_mcp_session(app), FakeLLM()) for _ in range(6)],
+            return_exceptions=True)
+    elapsed = perf_counter() - start
+    failures = [r for r in results if isinstance(r, BaseException)]
+    answered = [r for r in results if not isinstance(r, BaseException) and r[0]]
+    # O slot travado é escolhido em 1/3 das vezes e é cortado pelo teto por tool;
+    # o que não pode acontecer é um request ficar preso nos 30s do subprocess.
+    ok = not failures and len(answered) == 6 and elapsed < 10
+    return Verdict("mcp_pool_slot_isolation", assertion, ok,
+                   f"{elapsed:.2f}s, respostas={len(answered)}/6, falhas={len(failures)}", elapsed)
+
+
+async def scenario_mcp_supervisor_reconnects() -> Verdict:
+    """Supervisor do pool: sessão que cai é republicada como None e reconectada sozinha."""
+    assertion = ("sessão do slot caindo → mcp_pool[slot]=None com o erro registrado, e o "
+                 "supervisor reabre o slot sem tocar nos outros")
+    import main
+
+    start = perf_counter()
+    app = FakeApp(2)
+    app.state.mcp_pool[1] = FakeSession()          # o vizinho segue vivo o tempo todo
+    stop = asyncio.Event()
+    attempts = {"n": 0}
+    states: list[object] = []
+
+    class FlakyStdio:
+        """Primeira conexão morre no ping; a segunda fica de pé."""
+
+        def __init__(self, _params):
+            attempts["n"] += 1
+            self.fail = attempts["n"] == 1
+
+        async def __aenter__(self):
+            return ("read", "write")
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class FlakySession:
+        def __init__(self, read, write, fail):
+            self.fail = fail
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def initialize(self):
+            return None
+
+        async def send_ping(self):
+            if self.fail:
+                raise RuntimeError("stdio pipe fechada")
+
+    original = (main.stdio_client, main.ClientSession, main.warm_up_session,
+                main.MCP_PING_SECONDS, main.MCP_RETRY_SECONDS)
+    main.stdio_client = FlakyStdio
+    main.ClientSession = lambda read, write: FlakySession(read, write, attempts["n"] == 1)
+    main.warm_up_session = lambda _s: _zero()
+    main.MCP_PING_SECONDS, main.MCP_RETRY_SECONDS = 0.05, 0.05
+    try:
+        task = asyncio.create_task(main._mcp_supervisor(app, stop, 0))
+        for _ in range(40):                        # ~2s de observação
+            await asyncio.sleep(0.05)
+            states.append(app.state.mcp_pool[0])
+            if attempts["n"] >= 2 and app.state.mcp_pool[0] is not None:
+                break
+        stop.set()
+        await asyncio.wait_for(task, timeout=3)
+    finally:
+        (main.stdio_client, main.ClientSession, main.warm_up_session,
+         main.MCP_PING_SECONDS, main.MCP_RETRY_SECONDS) = original
+
+    elapsed = perf_counter() - start
+    went_down = any(s is None for s in states)
+    came_back = app.state.mcp_pool[0] is not None or attempts["n"] >= 2
+    neighbour_intact = app.state.mcp_pool[1] is not None
+    ok = went_down and came_back and neighbour_intact and attempts["n"] >= 2
+    return Verdict("mcp_supervisor_reconnects", assertion, ok,
+                   f"tentativas de conexão={attempts['n']} caiu={went_down} "
+                   f"voltou={came_back} vizinho_intacto={neighbour_intact}", elapsed)
+
+
+async def _zero() -> float:
+    return 0.0
+
+
 async def scenario_crash_mid_tool() -> Verdict:
     """LIVE: SIGKILL DENTRO de uma chamada de ferramenta — o estado não fica pela metade."""
-    assertion = ("processo morto no meio de uma tool → nenhuma sessão meio-escrita em "
-                 "agent_sessions e o turno seguinte na MESMA conversa funciona normalmente")
+    assertion = ("processo morto no meio de uma tool → checkpoint 'in_progress' fica na "
+                 "sessão, nenhum turno meio-escrito, e a MESMA conversa segue utilizável")
     if os.getenv("LIVE", "").strip() not in {"1", "true", "yes"}:
         return Verdict("crash_mid_tool", assertion, False,
                        "LIVE=1 ausente — cenário não roda contra Atlas", 0.0, skipped=True)
@@ -483,8 +794,41 @@ async def scenario_crash_mid_tool() -> Verdict:
         child.kill()
         return Verdict("crash_mid_tool", assertion, False,
                        "filho não chegou a entrar no turno em 90s", perf_counter() - start)
-    await asyncio.sleep(3)            # deixa o turno entrar na tool pendurada
-    child.kill()                      # SIGKILL no meio da chamada de ferramenta
+    # Espera o CHECKPOINT aparecer no banco em vez de dormir um tempo fixo: o turno
+    # faz guardrail + cache + memória (cada um uma ida ao Atlas) antes de chegar à
+    # ferramenta, e sob carga isso varia. Com sleep fixo o cenário passava sozinho e
+    # falhava em sequência — matava o processo ANTES do ponto que quer exercitar.
+    from pymongo import MongoClient
+
+    watcher = MongoClient(os.environ["MONGODB_URI"], serverSelectionTimeoutMS=15_000)
+    sessions = watcher[main_db]["agent_sessions"]
+    checkpoint_seen = False
+    for _ in range(60):                # até ~30s
+
+        doc = sessions.find_one({"session_id": conversation}, {"pending_turn": 1})
+        if ((doc or {}).get("pending_turn") or {}).get("status") == "in_progress":
+            checkpoint_seen = True
+            break
+        await asyncio.sleep(0.5)
+    watcher.close()
+    if not checkpoint_seen:
+        with contextlib.suppress(ProcessLookupError):
+            child.kill()
+        await child.communicate()
+        return Verdict("crash_mid_tool", assertion, False,
+                       "o turno não chegou ao checkpoint em 30s — cenário inconclusivo",
+                       perf_counter() - start)
+    await asyncio.sleep(1)            # já dentro da tool pendurada
+    try:
+        child.kill()                  # SIGKILL no meio da chamada de ferramenta
+    except ProcessLookupError:
+        # O filho já tinha morrido: o cenário não exercitou o que queria, e isso
+        # é uma FALHA do cenário — não pode passar como se tivesse matado no meio,
+        # nem derrubar a bateria inteira com a exceção crua (era o que acontecia).
+        await child.communicate()
+        return Verdict("crash_mid_tool", assertion, False,
+                       f"o filho morreu sozinho antes do SIGKILL (rc={child.returncode}) — "
+                       "cenário inconclusivo", perf_counter() - start)
     await child.communicate()
 
     from pymongo import MongoClient
@@ -492,11 +836,17 @@ async def scenario_crash_mid_tool() -> Verdict:
     client = MongoClient(os.environ["MONGODB_URI"], serverSelectionTimeoutMS=15_000)
     doc = client[main_db]["agent_sessions"].find_one({"session_id": conversation})
     turns = (doc or {}).get("turns") or []
-    # Nada pela metade: ou o turno não existe (a escrita de curto prazo só acontece
-    # DEPOIS do loop), ou existe completo, com pergunta E resposta.
-    half_written = [t for t in turns
-                    if not (t.get("user") or t.get("user_message"))
-                    or not (t.get("answer") or t.get("agent"))]
+    # Nada pela metade: os turnos são gravados aos PARES (role user + role assistant,
+    # num único $push), então um número ímpar ou uma entrada sem conteúdo significa
+    # escrita parcial. O critério anterior procurava campos `user`/`answer` que não
+    # existem neste schema e marcava QUALQUER turno como meio-escrito.
+    roles = [t.get("role") for t in turns]
+    half_written = ([t for t in turns if not (t.get("content") or "").strip()]
+                    or ([] if roles.count("user") == roles.count("assistant") else list(turns)))
+    # E o checkpoint tem que ter ficado: é ele que diz que houve um turno
+    # interrompido, em vez de o turno sumir sem rastro.
+    pending = (doc or {}).get("pending_turn") or {}
+    checkpointed = pending.get("status") == "in_progress"
     client.close()
 
     # Segunda metade da assertion: a MESMA conversa continua utilizável depois do
@@ -522,9 +872,9 @@ async def scenario_crash_mid_tool() -> Verdict:
     client[main_db]["agent_sessions"].delete_many({"session_id": conversation})
     client.close()
     elapsed = perf_counter() - start
-    return Verdict("crash_mid_tool", assertion, (not half_written) and resumed_ok,
+    return Verdict("crash_mid_tool", assertion, (not half_written) and resumed_ok and checkpointed,
                    f"turnos apos o kill={len(turns)} meio-escritos={len(half_written)} "
-                   f"retomada_ok={resumed_ok}", elapsed)
+                   f"checkpoint_pendente={checkpointed} retomada_ok={resumed_ok}", elapsed)
 
 
 SCENARIOS = {
@@ -537,7 +887,15 @@ SCENARIOS = {
     "legacy_500_flag": scenario_legacy_500_flag,
     "concurrent_tool_calls": scenario_concurrent_tool_calls,
     "turn_timeout": scenario_turn_timeout,
+    "atlas_retry_semantics": scenario_atlas_retry_semantics,
+    "atlas_failover": scenario_atlas_failover,
+    "search_unavailable": scenario_search_unavailable,
+    "guardrail_fails_closed": scenario_guardrail_fails_closed,
     "live_degraded_turn": scenario_live_degraded_turn,
+    "mcp_pool_round_robin": scenario_mcp_pool_round_robin,
+    "mcp_pool_slot_isolation": scenario_mcp_pool_slot_isolation,
+    "mcp_supervisor_reconnects": scenario_mcp_supervisor_reconnects,
+    "stale_checkpoint_recovery": scenario_stale_checkpoint_recovery,
     "crash_resume": scenario_crash_resume,
     "crash_mid_tool": scenario_crash_mid_tool,
 }

@@ -9,7 +9,7 @@ Variáveis (lidas a CADA chamada de propósito: a bateria troca o cenário entre
 os casos, no mesmo processo):
 
     CHAOS=1                liga
-    CHAOS_SCENARIO         timeout | hang | status | none
+    CHAOS_SCENARIO         timeout | hang | status | not_primary | search_down | none
     CHAOS_TARGET           substring casada contra "<ponto>:<nome>" ("" = todos)
     CHAOS_PHASE            fase exigida ("" = qualquer): before_first_token,
                            after_provider_response, between_tools
@@ -56,6 +56,35 @@ def _armed(point: str, name: str, phase: str) -> bool:
     return True
 
 
+def not_primary_error():
+    """Step-down do primário, com a classe REAL do driver.
+
+    `NotPrimaryError` carrega o código 10107 e o label `RetryableWriteError`: é
+    assim que o PyMongo decide reexecutar a operação depois da reeleição. Uma
+    exceção caseira testaria o `except` do app; esta testa a semântica do driver
+    e o mapeamento de `db.safe_query`.
+    """
+    from pymongo.errors import NotPrimaryError
+
+    return NotPrimaryError("not primary (step-down simulado)",
+                           {"code": 10107, "errmsg": "not primary",
+                            "errorLabels": ["RetryableWriteError"]})
+
+
+def search_unavailable_error():
+    """`mongot` fora / índice vetorial ausente, como o servidor devolve de fato.
+
+    `OperationFailure` com a mensagem do PlanExecutor é o que `db.safe_query`
+    mapeia para a `SafeQueryError` de kind "search" — que por sua vez decide o
+    fallback do cache e o fail-open/fail-closed do guardrail por área.
+    """
+    from pymongo.errors import OperationFailure
+
+    return OperationFailure(
+        "PlanExecutor error during aggregation :: caused by :: "
+        "$vectorSearch index not found (mongot indisponível)", code=8)
+
+
 class ChaosProviderError(Exception):
     """Erro de provedor simulado; carrega `status_code` como o SDK real carrega."""
 
@@ -74,6 +103,10 @@ async def hook(point: str, *, name: str = "", phase: str = "") -> None:
         return
     if scenario == "status":
         raise ChaosProviderError(int(os.getenv("CHAOS_STATUS", "429")))
+    if scenario == "not_primary":
+        raise not_primary_error()
+    if scenario == "search_down":
+        raise search_unavailable_error()
 
 
 def mangle(point: str, name: str, value):

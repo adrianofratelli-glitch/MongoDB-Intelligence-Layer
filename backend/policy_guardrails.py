@@ -28,6 +28,7 @@ is the policy store, the semantic matcher, and the system of record.
 """
 
 import logging
+import os
 import re
 from datetime import datetime, timezone
 
@@ -46,6 +47,30 @@ NEAR_MISS_MARGIN = 0.05                       # score dentro de [threshold-marge
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _injection_heuristic_enabled() -> bool:
+    """Ligada por padrão. `GUARDRAIL_INJECTION_HEURISTIC=0` volta ao comportamento
+    anterior (só denylist vetorial) — a flag existe para REVERTER, não para ativar."""
+    return os.getenv("GUARDRAIL_INJECTION_HEURISTIC", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _deterministic_injection(text: str) -> str | None:
+    """Retorna o padrão que casou, ou None. Falha ABERTA: se o helper comum não
+    estiver instalado, a denylist vetorial segue sendo a camada que decide."""
+    try:
+        import guardrails as shared          # pov-shared (núcleo); NUNCA este módulo
+    except ImportError:
+        return None
+    try:
+        result = shared.check_injection(text, use_llm=False)
+    except Exception:  # noqa: BLE001 — camada extra nunca derruba o turno
+        logger.warning("heurística de injeção indisponível; seguindo só com a denylist")
+        return None
+    if result.ok:
+        return None
+    findings = getattr(result, "findings", ()) or ()
+    return (findings[0][:40] if findings else result.reason)
 
 
 def _denylist_threshold(policy: dict) -> float | None:
@@ -209,6 +234,23 @@ async def check_input(text: str, user_key: str, session_id: str,
     """
     policy = await get_policy(area)
     violations: list[dict] = []
+
+    # 0) injeção de instrução, camada DETERMINÍSTICA (pov-shared, sem LLM, sem rede)
+    # Complementar — não substituta — da denylist vetorial, e a medição diz por quê:
+    # contra as sondas rotuladas de calibrate_thresholds.py, a heurística deu 0 falso
+    # positivo em 19 frases legítimas e pegou o caso que o embedding PERDE (frase
+    # proibida diluída com uma segunda intenção: score cai de 0,9284 para 0,6799,
+    # abaixo de qualquer pergunta legítima — ver docs/eval-report.md, achado 1).
+    # Em troca, ela NÃO pega os maliciosos parafraseados ("posso alegar que não
+    # recebi…"), que são justamente os que a busca vetorial pega com 0,79–0,86.
+    # Uma cobre o buraco da outra; por isso somam, e não se substituem.
+    if _injection_heuristic_enabled():
+        hit = _deterministic_injection(text)
+        if hit:
+            violations.append({
+                "rule": "injecao_deterministica", "kind": "prompt_injection",
+                "detail": f"padrão de injeção de instrução detectado ({hit})",
+            })
 
     # 1) semantic denylist (MongoDB Vector Search), scoped to the area
     threshold = _denylist_threshold(policy)

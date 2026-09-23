@@ -97,6 +97,25 @@ Docker: `docker build -t intelligence-layer-poc . && docker run --env-file .env 
 Defina `ENVIRONMENT=production`, `AUTH_REQUIRED=1` e `DEMO_TOKEN_ISSUANCE_ENABLED=0`. A inicialização rejeita segredos de JWT ou admin fracos/padrão e CORS com curinga; o `/metrics` exige autorização de admin. Nomes de modelo e caminhos de update passam por allowlist para evitar injeção de campos com ponto ou `$`. A imagem roda como UID 10001 atrás do nginx com cabeçalhos de segurança.
 
 
+## Antes de apresentar
+
+```bash
+./scripts/preflight.sh        # ~15s: Atlas, índices READY, config viva, dados, MCP, LLM
+```
+
+Índice em `BUILDING`, `model_config` ausente, cadeia de trocas quebrada, `npx` fora do PATH —
+cada um é uma forma de a demo falhar ao vivo, e todas eram descobertas no pior momento. Agora o
+pré-voo recusa antes.
+
+## Por que MongoDB para memória de agente
+
+O argumento completo, com os números medidos, está em
+[docs/memoria-agentica-mongodb.md](docs/memoria-agentica-mongodb.md). Em uma linha: memória curta,
+memória longa, cache semântico, configuração viva e trace são **documentos no mesmo cluster** —
+o isolamento por usuário é pré-filtro dentro do índice vetorial (não `WHERE` da aplicação), a
+recuperação é híbrida (`$vectorSearch` + BM25 com RRF) sobre os mesmos documentos, e o checkpoint
+do turno é um `$set` no mesmo documento da conversa, sem segundo sistema para coordenar.
+
 ## Limitação conhecida do guardrail semântico
 
 A denylist compara o embedding da mensagem inteira com o das frases proibidas. Uma frase proibida

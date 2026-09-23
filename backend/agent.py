@@ -1162,6 +1162,43 @@ async def run_loop_guarded(make_coro, *, emit, metrics) -> str:
         return resilience.DEGRADED_TURN_REPLY
 
 
+async def open_turn(conversation_id: str, user_key: str, user_msg: str) -> None:
+    """Marca o turno como EM ANDAMENTO no documento da sessão, antes do loop.
+
+    Sem isto, um processo morto no meio da chamada de ferramenta some sem deixar
+    rastro: a escrita de curto prazo só acontece DEPOIS do loop (medido no cenário
+    `crash_mid_tool`). Com isto, a sessão carrega `pending_turn` e a próxima
+    leitura sabe que houve um turno interrompido — dá para retomar ou avisar o
+    cliente em vez de fingir que nada aconteceu.
+
+    É UM update no MESMO documento da memória curta: o modelo documental absorve o
+    checkpoint sem tabela de estado à parte, sem coordenação entre dois sistemas e
+    sem transação distribuída — que é exatamente o argumento da PoV.
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        await poc()["agent_sessions"].update_one(
+            {"session_id": conversation_id, "user_key": user_key},
+            {"$set": {"pending_turn": {"user": user_msg, "started_at": now,
+                                       "status": "in_progress"},
+                      "updated_at": now},
+             "$setOnInsert": {"session_id": conversation_id, "created_at": now,
+                              "user_key": user_key}},
+            upsert=True,
+        )
+    except Exception:  # noqa: BLE001 — checkpoint é rede de segurança, não pré-requisito
+        logger.warning("checkpoint de início de turno falhou (session=%s)", conversation_id)
+
+
+async def interrupted_turn(conversation_id: str, user_key: str) -> dict | None:
+    """O turno que ficou em aberto na sessão, se houver. Lido na retomada."""
+    doc = await poc()["agent_sessions"].find_one(
+        {"session_id": conversation_id, "user_key": user_key},
+        {"pending_turn": 1}, max_time_ms=MAX_TIME_MS)
+    pending = (doc or {}).get("pending_turn")
+    return pending if pending and pending.get("status") == "in_progress" else None
+
+
 async def _store_short_term(conversation_id, user_key, user_msg, final_answer,
                             emit, metrics) -> int:
     """$push this turn onto POC.agent_sessions — short-term (conversational) memory.
@@ -1187,7 +1224,9 @@ async def _store_short_term(conversation_id, user_key, user_msg, final_answer,
             },
             "$setOnInsert": {"session_id": conversation_id, "created_at": now,
                              "user_key": user_key},
-            "$set": {"updated_at": now},
+            # O turno gravado FECHA o checkpoint aberto por `open_turn`: uma única
+            # operação no mesmo documento grava a conversa e limpa o "em andamento".
+            "$set": {"updated_at": now, "pending_turn": None},
         },
         upsert=True,
     )
@@ -1401,6 +1440,21 @@ async def run_agent(
         input_text=user_msg, metadata={"scenario": scenario, "area": area},
     )
 
+    # Retomada: um turno anterior nesta MESMA conversa pode ter ficado com o
+    # checkpoint aberto (processo morto no meio de uma ferramenta — ver
+    # `open_turn`/cenário de caos `crash_mid_tool`). Detecta, avisa no trace e
+    # LIMPA — sem isso o checkpoint ficaria "in_progress" para sempre, e o
+    # próximo turno nem saberia que houve uma interrupção.
+    stale = await interrupted_turn(conversation_id, user_key)
+    if stale is not None:
+        await poc()["agent_sessions"].update_one(
+            {"session_id": conversation_id, "user_key": user_key},
+            {"$set": {"pending_turn": None}},
+        )
+        emit("perceive", "message", actor="agent",
+             text="Um turno anterior desta conversa foi interrompido antes de terminar "
+                  "(processo reiniciado no meio de uma consulta) — retomando normalmente.")
+
     # Perceive — the customer message enters the loop (já sem PII em claro)
     emit("perceive", "message", actor="user", text=user_msg)
     emit("perceive", "tool_call", actor="mongodb", tool="find (app_users → area_profiles)",
@@ -1612,6 +1666,10 @@ async def run_agent(
                       + budget_block + summary_block)
 
     # ---- Agent tool-use loop --------------------------------------------------
+    # Checkpoint ANTES do loop: se o processo morrer no meio de uma ferramenta, a
+    # sessão registra que houve um turno interrompido em vez de perdê-lo em
+    # silêncio. Fecha sozinho na gravação do turno (`_store_short_term`).
+    await open_turn(conversation_id, user_key, user_msg)
     final_answer = await run_loop_guarded(
         lambda: _run_tool_loop(
             session, tools, system_static, system_dynamic, user_msg, emit,

@@ -23,7 +23,7 @@ Os cenários offline usam sessão MCP falsa e cliente de LLM falso, mas executam
 banco de TESTE isolado (`POC_test`/`ai_brain_test`, `backend/scripts/isolation.py`) — nunca o da
 demo, que é recusado sem `ALLOW_DEMO_DB_WRITE=1`.
 
-## Resultado (última execução: 12/12)
+## Resultado (última execução: 20/20)
 
 | Cenário | O que injeta | Assertion | Resultado |
 |---|---|---|---|
@@ -38,9 +38,50 @@ demo, que é recusado sem `ALLOW_DEMO_DB_WRITE=1`.
 | `turn_timeout` | LLM travado, `AGENT_TURN_TIMEOUT_SECONDS=1` | corta em ~1s com `degraded_reason=turn_timeout` | PASS (1,00s) |
 | `live_degraded_turn` | `run_agent` inteiro com o MCP falhando (Atlas real) | resposta degradada + trace completo + turno gravado, sem exceção | PASS (7,94s) |
 | `crash_resume` | `SIGKILL` no processo depois de gravar o turno | a sessão continua legível em `agent_sessions` (2 turnos persistidos) | PASS (6,61s) |
-| `crash_mid_tool` | `SIGKILL` **dentro** de uma chamada de ferramenta pendurada | nenhuma sessão meio-escrita e a MESMA conversa segue utilizável no turno seguinte | PASS (20,28s) |
+| `crash_mid_tool` | `SIGKILL` **dentro** de uma chamada de ferramenta pendurada | checkpoint `pending_turn` fica na sessão, nenhum turno meio-escrito, conversa segue utilizável | PASS (25,7s) |
+| `atlas_retry_semantics` | — (inspeção do cliente) | `retryWrites`/`retryReads` declarados + orçamento CSOT por operação: quem cobre o step-down é o DRIVER | PASS |
+| `atlas_failover` | `NotPrimaryError` (código 10107 + label `RetryableWriteError`) sobrevivendo ao retry | vira `SafeQueryError` de conexão e o turno degrada com trace inteiro | PASS |
+| `search_unavailable` | `mongot` fora / índice vetorial ausente | `SafeQueryError` kind `search`; cache cai para match exato, memória para fatos recentes | PASS |
+| `guardrail_fails_closed` | denylist vetorial indisponível | `semantic_fail_mode` do DOCUMENTO decide: `closed` bloqueia, `open` atende — sem deploy | PASS (4,9s) |
+| `mcp_pool_round_robin` | 1 de 3 slots do pool caído | round-robin nunca devolve o slot morto; pool inteiro caído devolve `None`, sem exceção | PASS |
+| `mcp_pool_slot_isolation` | 1 slot pendurado + 2 sadios, 6 turnos simultâneos | os 6 terminam pelos slots vivos dentro do teto por tool (2,0s), sem esperar o travado | PASS (2,0s) |
+| `mcp_supervisor_reconnects` | sessão do slot caindo no ping | slot vira `None` com o erro registrado e o supervisor reabre sozinho; vizinho intacto | PASS (0,15s) |
+| `stale_checkpoint_recovery` | checkpoint `pending_turn` deixado por um crash anterior na mesma conversa | o próximo turno detecta, anuncia a retomada no trace e limpa o checkpoint | PASS (5,9s) |
+
+## Modos de falha do Atlas que a bateria cobre
+
+Três cenários novos existem porque esta PoV **vende o Atlas**, e resiliência de banco não pode
+ficar só no slide:
+
+* **Step-down de primário.** O que segura não é código de aplicação, é o driver: `retryWrites` e
+  `retryReads` estão declarados explicitamente em `db.py` (embora sejam default) e verificados por
+  `atlas_retry_semantics`. Durante a eleição, a operação é reexecutada no novo primário e o turno
+  não vê nada. `atlas_failover` cobre o caso em que o retry TAMBÉM esgota: vira mensagem de UI e
+  turno degradado, nunca stack trace.
+  O exercício com failover REAL fica em `scripts/atlas_failover_drill.py`, atrás de duas travas —
+  `restartPrimaries` é operação de CLUSTER INTEIRO e este cluster é compartilhado com outras PoVs.
+* **`mongot` indisponível.** `search_unavailable` injeta o `OperationFailure` real do PlanExecutor
+  e confere o mapeamento para `SafeQueryError` kind `search` — que é o que dispara o fallback de
+  match exato no cache e o modo `recent` na memória.
+* **Guardrail sem camada semântica.** `guardrail_fails_closed` prova que quem decide é o
+  documento de política: o mesmo campo `semantic_fail_mode` bloqueia ou libera, com um
+  `update_one` e sem deploy. (Esta demo roda fail-closed em TODA área — ADR-001, risco 3.)
 
 ## Bugs REAIS revelados e corrigidos
+
+0. **Nome de banco de teste acumulava sufixo entre cenários — a bateria achava a própria
+   bateria.** `scripts/isolation.test_database_names()` derivava do valor ATUAL de
+   `os.environ["MONGODB_DB"]`, mas `use_test_databases()` muta esse mesmo env var sem
+   restaurar. Num processo de vida longa como a bateria completa (vários cenários no MESMO
+   processo Python), a segunda chamada via `POC` → `POC_test` → `POC_test_test` → …
+   O banco fantasma `POC_test_test` não tinha `app_users`, então `crash_mid_tool` falhava com
+   *"Identidade de demonstração não reconhecida"* — mas SÓ quando rodava depois de outro
+   cenário `LIVE` no mesmo processo, nunca sozinho. Foi reproduzido isolando a sequência exata
+   (`live_degraded_turn` → cenários do pool → `crash_mid_tool`) e confirmado direto no cluster:
+   `POC_test_test` existia, `POC_test` (o real) não foi afetado. Correção: os nomes de teste
+   agora derivam da constante `DEMO_MAIN_DB`/`DEMO_BRAIN_DB` ("POC"/"ai_brain"), nunca do
+   env var mutável — a mesma filosofia que `guard()` já usava. Regressão em
+   `tests/test_policies.py:IsolationDatabaseNamingTests`.
 
 1. **Payload corrompido do MCP era reportado ao cliente como "pedido não encontrado".**
    `agent._is_empty_order_read` decidia "resultado vazio" por uma única condição: não haver

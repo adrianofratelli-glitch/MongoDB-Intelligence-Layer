@@ -61,8 +61,20 @@ def allow_demo_write() -> bool:
 
 
 def test_database_names() -> tuple[str, str]:
-    main = os.getenv("MONGODB_TEST_DB") or f"{os.getenv('MONGODB_DB', DEMO_MAIN_DB)}_test"
-    brain = os.getenv("MONGODB_TEST_BRAIN_DB") or f"{os.getenv('MONGODB_BRAIN_DB', DEMO_BRAIN_DB)}_test"
+    """Deriva SEMPRE do nome de banco da DEMO, nunca do valor atual de MONGODB_DB.
+
+    Bug real encontrado pela bateria de caos: como `use_test_databases` muta
+    `os.environ["MONGODB_DB"]` sem restaurar, um processo de vida longa que chama
+    esta função mais de uma vez (a bateria roda vários cenários no MESMO processo)
+    acumulava sufixo — POC -> POC_test -> POC_test_test -> ... — e o banco fantasma
+    resultante não tinha `app_users`, derrubando `crash_mid_tool` com "Identidade
+    de demonstração não reconhecida" só quando rodava depois de outro cenário LIVE.
+    Ler `MONGODB_TEST_DB`/`MONGODB_TEST_BRAIN_DB` (o override explícito) ou o nome
+    ORIGINAL da demo (constante, nunca o que está em `os.environ` agora) é o que
+    torna a função idempotente independentemente de quantas vezes é chamada.
+    """
+    main = os.getenv("MONGODB_TEST_DB") or f"{DEMO_MAIN_DB}_test"
+    brain = os.getenv("MONGODB_TEST_BRAIN_DB") or f"{DEMO_BRAIN_DB}_test"
     return main, brain
 
 
